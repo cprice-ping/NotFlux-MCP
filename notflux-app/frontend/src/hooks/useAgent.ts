@@ -1,0 +1,179 @@
+import { useState, useCallback, useRef } from 'react';
+import type { ChatMessage, AgentStreamEvent } from '../types';
+
+function uid() {
+  return Math.random().toString(36).slice(2);
+}
+
+/** Extract the text payload from a single Agent Engine stream event */
+function extractText(event: AgentStreamEvent): string {
+  if (event.content?.parts) {
+    return event.content.parts.map((p) => p.text ?? '').join('');
+  }
+  if (typeof event.output === 'string') return event.output;
+  if (typeof event.text === 'string') return event.text;
+  return '';
+}
+
+/**
+ * @param agentToken  The agent-scoped token (aud=google-agent, scope=agent-use).
+ *                    The backend exchanges this for an MCP-audience token before
+ *                    injecting it into the Vertex session state.
+ *                    Falls back to the person_token when the agent resource is
+ *                    not configured (VITE_PINGONE_AGENT_RESOURCE unset).
+ */
+export function useAgent(agentToken: string | null, userSub?: string) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [thinking, setThinking] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Create (or re-use) an Agent Engine session tied to the current agent token
+  const ensureSession = useCallback(async (): Promise<string | null> => {
+    if (sessionId) return sessionId;
+    if (!agentToken) return null;
+
+    try {
+      const res = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${agentToken}`,
+        },
+        body: JSON.stringify({ sub: userSub ?? 'anonymous' }),
+      });
+
+      if (!res.ok) {
+        console.warn('Session creation failed, will use stateless mode');
+        return null;
+      }
+
+      const data = await res.json() as { sessionId: string };
+      setSessionId(data.sessionId);
+      return data.sessionId;
+    } catch {
+      console.warn('Session creation error, using stateless mode');
+      return null;
+    }
+  }, [sessionId, agentToken, userSub]);
+
+  const sendMessage = useCallback(
+    async (text: string) => {
+      if (!agentToken || !text.trim() || thinking) return;
+
+      // Append user message
+      const userMsg: ChatMessage = { id: uid(), role: 'user', content: text };
+      setMessages((prev) => [...prev, userMsg]);
+
+      // Reserve a streaming assistant message slot
+      const assistantId = uid();
+      const assistantMsg: ChatMessage = {
+        id: assistantId,
+        role: 'assistant',
+        content: '',
+        streaming: true,
+      };
+      setMessages((prev) => [...prev, assistantMsg]);
+      setThinking(true);
+
+      const sid = await ensureSession();
+      abortRef.current = new AbortController();
+
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${agentToken}`,
+          },
+          body: JSON.stringify({ message: text, sessionId: sid }),
+          signal: abortRef.current.signal,
+        });
+
+        if (!res.ok || !res.body) {
+          const errText = await res.text();
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId
+                ? { ...m, content: `Error: ${errText}`, streaming: false, error: true }
+                : m
+            )
+          );
+          return;
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let accumulated = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const payload = line.slice(6).trim();
+            if (payload === '[DONE]') break;
+
+            try {
+              const event = JSON.parse(payload) as AgentStreamEvent;
+              if (event.error) {
+                accumulated += `\n⚠️ ${event.error}`;
+              } else {
+                accumulated += extractText(event);
+              }
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId
+                    ? { ...m, content: accumulated, streaming: true }
+                    : m
+                )
+              );
+            } catch {
+              // non-JSON line — skip
+            }
+          }
+        }
+
+        // Mark streaming done
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId
+              ? { ...m, streaming: false }
+              : m
+          )
+        );
+      } catch (e) {
+        if ((e as Error).name === 'AbortError') return;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId
+              ? {
+                  ...m,
+                  content: `Connection error: ${String(e)}`,
+                  streaming: false,
+                  error: true,
+                }
+              : m
+          )
+        );
+      } finally {
+        setThinking(false);
+        abortRef.current = null;
+      }
+    },
+    [agentToken, thinking, ensureSession]
+  );
+
+  const clearMessages = useCallback(() => {
+    setMessages([]);
+    setSessionId(null);
+  }, []);
+
+  return { messages, thinking, sendMessage, clearMessages, sessionId };
+}

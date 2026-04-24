@@ -1,0 +1,36 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: notflux-mcp-server
+  namespace: ping-devops-cprice
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-ping-cloud
+    nginx.ingress.kubernetes.io/backend-protocol: HTTP
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # CORS headers – MCP clients send Authorization and Mcp-Session-Id
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, DELETE, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "authorization, content-type, mcp-session-id"
+    nginx.ingress.kubernetes.io/cors-expose-headers: "Mcp-Session-Id"
+    # SSE support (GET /mcp streams)
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+spec:
+  ingressClassName: nginx-public
+  tls:
+    - hosts:
+        - notflux-mcp.ping-devops.com
+      secretName: notflux-mcp-server-tls
+  rules:
+    - host: notflux-mcp.ping-devops.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: notflux-mcp-server
+                port:
+                  number: 80

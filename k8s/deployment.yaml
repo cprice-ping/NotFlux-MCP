@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notflux-mcp-server
+  namespace: ping-devops-cprice
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notflux-mcp-server
+  template:
+    metadata:
+      labels:
+        app: notflux-mcp-server
+    spec:
+      containers:
+        - name: notflux-mcp-server
+          image: docker.io/pricecs/notflux-mcp-server:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: NOTFLUX_API_BASE
+              value: "http://notflux-api-kong-proxy"
+            - name: PINGONE_ENV_ID
+              value: "59bb6a66-e76e-490c-b83a-884c50423da4"
+            - name: MCP_PUBLIC_BASE_URL
+              value: "https://notflux-mcp.ping-devops.com"
+            # -- JWT validation (set MCP_AUDIENCE to enable) --
+            # - name: MCP_AUDIENCE
+            #   value: "notflux-mcp"
+            # - name: MCP_REQUIRED_SCOPE
+            #   value: "use_mcp_tools"
+            # -- RS Token Exchange (set all three to enable) --
+            # These should come from a Secret in production.
+            # - name: MCP_RS_CLIENT_ID
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: notflux-mcp-pingone
+            #       key: rs-client-id
+            # - name: MCP_RS_CLIENT_SECRET
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: notflux-mcp-pingone
+            #       key: rs-client-secret
+            # - name: MCP_API_AUDIENCE
+            #   value: "https://notflux-api.ping-devops.com"
+            # - name: MCP_API_SCOPE
+            #   value: "get_media"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"

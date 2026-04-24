@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    background-color: #0d0d0d;
+    color: #ffffff;
+    min-height: 100vh;
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #3a3a3a;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #555;
+  }
+}
+
+@layer components {
+  .notflux-logo {
+    font-size: 2rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    background: linear-gradient(135deg, #1b6aff 0%, #6c47ff 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .btn-primary {
+    @apply bg-accent hover:bg-accent-light text-white font-semibold px-6 py-2.5 rounded-lg transition-colors duration-150;
+  }
+
+  .btn-secondary {
+    @apply bg-bg-surface hover:bg-bg-card text-text-primary font-medium px-6 py-2.5 rounded-lg border border-white/10 transition-colors duration-150;
+  }
+
+  .card-hover {
+    @apply transition-all duration-200 hover:scale-105 hover:shadow-xl hover:shadow-black/50;
+  }
+}
+
+/* Streaming text cursor blink */
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.streaming-cursor::after {
+  content: '▋';
+  display: inline-block;
+  animation: cursor-blink 0.8s step-end infinite;
+  color: #6c47ff;
+  margin-left: 1px;
+}
