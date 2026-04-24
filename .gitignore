@@ -2,3 +2,9 @@ node_modules/
 dist/
 .env
 *.js.map
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+

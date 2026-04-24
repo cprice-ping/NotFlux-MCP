@@ -1,0 +1,73 @@
+"""Deploy or update the NotFlux agent on Vertex AI Agent Engine.
+
+Uses ADK directly — not Agent Studio — so we can attach before_agent_callback
+to inject per-session MCP auth headers from Vertex session state.
+
+Prerequisites:
+    pip install -r requirements.txt
+    gcloud auth application-default login
+
+Usage:
+    # First deployment — creates a new Reasoning Engine:
+    python deploy.py --create
+
+    # Update existing agent (retains the same resource ID, no need to
+    # reconfigure the NotFlux App backend VERTEX_AGENT_RESOURCE):
+    python deploy.py --update 7712115294709219328
+"""
+
+import argparse
+import vertexai
+from vertexai.preview.reasoning_engines import ReasoningEngine
+
+from agent import app
+
+PROJECT_ID = '3682147732'
+LOCATION = 'us-west1'
+
+REQUIREMENTS = [
+    'google-cloud-aiplatform[adk,reasoningengine]',
+    'google-adk>=0.4.0',
+]
+
+
+def create_agent() -> ReasoningEngine:
+    vertexai.init(project=PROJECT_ID, location=LOCATION)
+    app.set_up()
+    engine = ReasoningEngine.create(
+        app.app,
+        requirements=REQUIREMENTS,
+        display_name='NotFlux',
+        description='NotFlux AI assistant with per-session authenticated MCP tool access',
+    )
+    resource_id = engine.resource_name.split('/')[-1]
+    print(f'Created: {engine.resource_name}')
+    print(f'Resource ID: {resource_id}')
+    print(f'\nUpdate VERTEX_AGENT_RESOURCE in notflux-app/backend/.env:')
+    print(f'  projects/{PROJECT_ID}/locations/{LOCATION}/reasoningEngines/{resource_id}')
+    return engine
+
+
+def update_agent(resource_id: str) -> ReasoningEngine:
+    vertexai.init(project=PROJECT_ID, location=LOCATION)
+    app.set_up()
+    engine = ReasoningEngine(resource_id)
+    engine.update(
+        app.app,
+        requirements=REQUIREMENTS,
+    )
+    print(f'Updated: {engine.resource_name}')
+    return engine
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Deploy NotFlux agent to Vertex AI Agent Engine')
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--create', action='store_true', help='Create a new agent')
+    group.add_argument('--update', metavar='RESOURCE_ID', help='Update existing agent by resource ID')
+    args = parser.parse_args()
+
+    if args.create:
+        create_agent()
+    else:
+        update_agent(args.update)
