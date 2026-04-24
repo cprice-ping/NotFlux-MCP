@@ -1,8 +1,56 @@
-# NotFlux MCP Server
+# NotFlux — AI-Powered Streaming Demo
 
-An [MCP](https://modelcontextprotocol.io/) server compliant with the **2025-11-25 specification** that exposes the NotFlux streaming API as callable tools for AI agents.
+A demo application showing how to integrate a **Google Vertex AI Agent Engine** chatbot into a streaming media app, with a full enterprise OAuth 2.0 token exchange chain enforced at every service boundary.
 
-## Transport
+## System overview
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  NotFlux App  (notflux-app/)                            │
+│                                                         │
+│  React + Vite frontend  ◄──────────────────────────┐   │
+│    • PingOne PKCE login                             │   │
+│    • Netflix-style media grid                       │   │
+│    • AI chat panel (streaming)                      │   │
+│         │                                           │   │
+│         │ agent_token                               │   │
+│         ▼                                           │   │
+│  Express backend proxy                              │   │
+│    • Token Exchange 1: agent_token → mcp_token      │   │
+│    • Vertex AI Agent Engine sessions + SSE stream ──┘   │
+└──────────────────────────┬──────────────────────────────┘
+                           │ mcp_token (via Vertex session state)
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│  NotFlux MCP Server  (src/)                             │
+│                                                         │
+│  MCP 2025-11-25 spec, Streamable HTTP, port 8080        │
+│    • JWT validation (RFC 9470 / RFC 6750)               │
+│    • Token Exchange 2: mcp_token → api_token            │
+│    • 4 tools: get_all_media_metadata, get_media_        │
+│      metadata, get_media_content, get_account           │
+└──────────────────────────┬──────────────────────────────┘
+                           │ api_token (ephemeral)
+                           ▼
+┌─────────────────────────────────────────────────────────┐
+│  Kong Gateway + PingOne AAM                             │
+│    • ping-auth plugin validates api_token               │
+│    • AAM policy enforces per-user content ratings       │
+└─────────────────────────────────────────────────────────┘
+```
+
+The user logs into the NotFlux App with PingOne. A second, silently-acquired token is scoped to the Vertex AI agent. The Vertex agent calls the MCP Server via the MCP protocol, passing a token that is only useful against the MCP Server — not Kong. The MCP Server performs its own token exchange to get a short-lived Kong-usable token before making each API call. No single component ever holds a token that is valid against all services.
+
+## Components
+
+| Directory | Description |
+|-----------|-------------|
+| `src/` | MCP Server — TypeScript, Node.js 22, `@modelcontextprotocol/sdk` |
+| `notflux-app/frontend/` | React + Vite + Tailwind SPA |
+| `notflux-app/backend/` | Express proxy — Vertex AI bridge + token exchanges |
+| `k8s/` | Kubernetes manifests (ARM64, namespace `ping-devops-cprice`) |
+
+## MCP Server transport
 
 **Streamable HTTP** – the server exposes a single `/mcp` endpoint:
 
@@ -12,7 +60,7 @@ An [MCP](https://modelcontextprotocol.io/) server compliant with the **2025-11-2
 | `GET /mcp` | SSE stream for server-to-client notifications |
 | `DELETE /mcp` | Explicit session termination |
 
-## Tools
+## MCP tools
 
 | Tool | Description |
 |------|-------------|
@@ -21,71 +69,63 @@ An [MCP](https://modelcontextprotocol.io/) server compliant with the **2025-11-2
 | `get_media_content` | Retrieve playable content using the DRM token |
 | `get_account` | Look up an account by UUID |
 
-## Prerequisites
-
-- Node.js ≥ 20
-- A valid PingOne bearer token for the NotFlux API
-
-## Setup
+## Running locally
 
 ```bash
-# 1. Install dependencies
+# 1. Install all dependencies (root MCP Server + notflux-app)
 npm install
+cd notflux-app && npm install && cd ..
 
-# 2. Configure environment
-cp .env.example .env
-# Edit .env and set ACCESS_TOKEN
-```
+# 2. Configure environment files
+cp .env.example .env                                          # MCP Server
+cp notflux-app/.env.example notflux-app/backend/.env         # App backend
+cp notflux-app/frontend/.env.example notflux-app/frontend/.env  # App frontend
 
-> **Getting a token** – use the PingOne Orchestrate flow in the Postman collection
-> ("Get Person Token") to obtain a bearer token, then paste it into `ACCESS_TOKEN`.
+# 3. Fill in PingOne client IDs/secrets/audiences in each .env file
 
-## Running
+# 4. Start the app (frontend on :5173, backend on :3001)
+cd notflux-app && npm run dev
 
-```bash
-# Development (live-reload)
+# 5. Start the MCP Server separately (port 8080)
 npm run dev
-
-# Production build
-npm run build
-npm start
-```
-
-The server starts on `http://localhost:3000/mcp` by default. Set `PORT` in `.env` to override.
-
-## Connecting an MCP Client
-
-### Claude Desktop (`claude_desktop_config.json`)
-
-```json
-{
-  "mcpServers": {
-    "notflux": {
-      "url": "http://localhost:3000/mcp"
-    }
-  }
-}
-```
-
-### VS Code (`.vscode/mcp.json`)
-
-```json
-{
-  "servers": {
-    "notflux": {
-      "type": "http",
-      "url": "http://localhost:3000/mcp"
-    }
-  }
-}
 ```
 
 ## Environment Variables
 
+### MCP Server (`.env`)
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `ACCESS_TOKEN` | Yes | — | PingOne bearer token |
-| `PORT` | No | `3000` | HTTP listen port |
+| `PINGONE_ENV_ID` | Yes | — | PingOne environment UUID |
+| `MCP_AUDIENCE` | Yes* | — | `aud` claim to validate on inbound tokens (`notflux-mcp`). Set to enable JWT validation |
+| `MCP_REQUIRED_SCOPE` | No | `use_mcp_tools` | Scope required on inbound MCP tokens |
+| `MCP_RS_CLIENT_ID` | Yes* | — | `notflux-mcp-rs` Worker app client ID. Set to enable Exchange 2 |
+| `MCP_RS_CLIENT_SECRET` | Yes* | — | `notflux-mcp-rs` Worker app client secret |
+| `MCP_API_AUDIENCE` | Yes* | — | Audience of the NotFlux API resource (what Kong validates) |
+| `MCP_API_SCOPE` | No | `get_media` | Scope to request on the outbound API token |
+| `MCP_PUBLIC_BASE_URL` | No | — | Public URL, used in WWW-Authenticate headers and RFC 9470 discovery |
+| `PORT` | No | `8080` | HTTP listen port |
+
+### App backend (`notflux-app/backend/.env`)
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `PINGONE_ENV_ID` | Yes | — | PingOne environment UUID |
+| `PINGONE_TX_CLIENT_ID` | Yes* | — | `notflux-backend` Worker app client ID |
+| `PINGONE_TX_CLIENT_SECRET` | Yes* | — | `notflux-backend` Worker app client secret |
+| `PINGONE_MCP_AUDIENCE` | Yes* | — | Audience of the MCP Server resource (`notflux-mcp`) |
+| `PINGONE_MCP_SCOPE` | No | `use_mcp_tools` | Scope to request in Exchange 1 |
+| `PINGONE_AGENT_AUDIENCE` | No | — | Expected `aud` on incoming agent tokens (enables validation) |
+| `VERTEX_AGENT_RESOURCE` | Yes | — | Vertex AI Agent Engine resource name |
+| `BACKEND_PORT` | No | `3001` | HTTP listen port |
+
+### App frontend (`notflux-app/frontend/.env`)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `VITE_PINGONE_ENV_ID` | Yes | PingOne environment UUID |
+| `VITE_PINGONE_CLIENT_ID` | Yes | SPA application client ID |
+| `VITE_PINGONE_AGENT_RESOURCE` | No | Audience URI for the agent resource (enables separate agent token) |
 
 ## OAuth 2.0 Token Chain (RFC 8693 Token Exchange)
 
