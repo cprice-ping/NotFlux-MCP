@@ -4,13 +4,15 @@ import { getAllMedia } from '../api/notflux';
 import type { MediaItem } from '../types';
 import Header from '../components/Header';
 import MediaCard from '../components/MediaCard';
+import MediaCardSkeleton from '../components/MediaCardSkeleton';
 import MediaModal from '../components/MediaModal';
 import AgentPanel from '../components/AgentPanel';
+import KeyboardShortcutsHelp from '../components/KeyboardShortcutsHelp';
 import { useAgent } from '../hooks/useAgent';
+import { useKeyboardShortcuts } from '../hooks/useKeyboard';
 
 interface Props {
   user: User;
-  agentToken: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -22,8 +24,8 @@ const HERO_PROMPTS = [
   'Recommend something based on my account',
 ];
 
-export default function HomePage({ user, agentToken }: Props) {
-  const accessToken = user.access_token;   // person_token — direct NotFlux API calls
+export default function HomePage({ user }: Props) {
+  const accessToken = user.access_token;   // person_token — direct API calls + agent sessions
   const userSub = user.profile.sub;
 
   const [media, setMedia] = useState<MediaItem[]>([]);
@@ -32,16 +34,36 @@ export default function HomePage({ user, agentToken }: Props) {
   const [selectedItem, setSelectedItem] = useState<MediaItem | null>(null);
   const [agentOpen, setAgentOpen] = useState(false);
 
-  // agentToken (aud=google-agent, scope=agent-use) is sent to the backend,
-  // which exchanges it for an MCP-audience token before the Vertex API call.
-  // Falls back to accessToken when the agent resource env var is not set.
+  // person_token is sent to the backend, which performs Token Exchange
+  // (RFC 8693) to get an MCP-audience token before the Vertex API call.
   const { messages, thinking, sendMessage, clearMessages } = useAgent(
-    agentToken ?? accessToken,
+    accessToken,
     userSub
   );
 
+  // Keyboard shortcuts
+  useKeyboardShortcuts([
+    {
+      key: 'k',
+      meta: true,
+      handler: () => setAgentOpen(prev => !prev),
+      description: 'Toggle AI assistant',
+    },
+    {
+      key: 'Escape',
+      handler: () => {
+        if (selectedItem) setSelectedItem(null);
+        else if (agentOpen) setAgentOpen(false);
+      },
+      description: 'Close modal or panel',
+    },
+  ]);
+
   // Fetch media on mount
   useEffect(() => {
+    setMedia([]);
+    setMediaLoading(true);
+    setMediaError('');
     getAllMedia(accessToken)
       .then((items) => {
         setMedia(items);
@@ -129,13 +151,24 @@ export default function HomePage({ user, agentToken }: Props) {
         {/* ------------------------------------------------------------------ */}
         <main className="px-6 sm:px-8 pb-16 space-y-10">
           {mediaLoading && (
-            <div className="flex items-center justify-center py-20 text-text-muted gap-2">
-              <svg className="animate-spin w-5 h-5 text-accent" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
-              </svg>
-              Loading your library…
-            </div>
+            <>
+              <section>
+                <div className="h-5 bg-bg-surface rounded w-48 mb-4 skeleton" />
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+                  {Array.from({ length: 10 }).map((_, i) => (
+                    <MediaCardSkeleton key={i} />
+                  ))}
+                </div>
+              </section>
+              <section>
+                <div className="h-5 bg-bg-surface rounded w-40 mb-4 skeleton" />
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+                  {Array.from({ length: 5 }).map((_, i) => (
+                    <MediaCardSkeleton key={i} />
+                  ))}
+                </div>
+              </section>
+            </>
           )}
 
           {!mediaLoading && mediaError && (
@@ -243,6 +276,9 @@ export default function HomePage({ user, agentToken }: Props) {
           )}
         </button>
       )}
+
+      {/* Keyboard shortcuts help */}
+      <KeyboardShortcutsHelp />
     </div>
   );
 }

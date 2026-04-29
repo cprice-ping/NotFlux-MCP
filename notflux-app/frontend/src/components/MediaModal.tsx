@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { MediaItem } from '../types';
 import { getMediaContent } from '../api/notflux';
 
@@ -28,6 +28,17 @@ export default function MediaModal({ item, accessToken, onClose }: Props) {
   >('idle');
   const [errorMsg, setErrorMsg] = useState('');
   const title = item.title ?? item.id.slice(0, 8).toUpperCase();
+
+  // Handle Escape key to close modal
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [onClose]);
 
   async function handleWatch() {
     const drm = item.drm as string | undefined;

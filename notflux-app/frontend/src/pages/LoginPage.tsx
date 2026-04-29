@@ -81,32 +81,10 @@ export default function LoginPage() {
   );
 }
 
-function PingIcon() {
-  return (
-    <svg
-      width="20"
-      height="20"
-      viewBox="0 0 24 24"
-      fill="none"
-      aria-hidden="true"
-      className="shrink-0"
-    >
-      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.5" />
-      <path
-        d="M8 12a4 4 0 1 1 8 0 4 4 0 0 1-8 0"
-        fill="currentColor"
-        opacity="0.4"
-      />
-      <circle cx="12" cy="12" r="2" fill="currentColor" />
-    </svg>
-  );
-}
-
 function LoadingSpinner() {
   return (
     <svg
-      className="animate-spin w-4 h-4"
-      xmlns="http://www.w3.org/2000/svg"
+      className="animate-spin w-5 h-5"
       fill="none"
       viewBox="0 0 24 24"
       aria-hidden="true"
@@ -124,6 +102,27 @@ function LoadingSpinner() {
         fill="currentColor"
         d="M4 12a8 8 0 018-8v8z"
       />
+    </svg>
+  );
+}
+
+function PingIcon() {
+  return (
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      className="shrink-0"
+    >
+      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.5" />
+      <path
+        d="M8 12a4 4 0 1 1 8 0 4 4 0 0 1-8 0"
+        fill="currentColor"
+        opacity="0.4"
+      />
+      <circle cx="12" cy="12" r="2" fill="currentColor" />
     </svg>
   );
 }

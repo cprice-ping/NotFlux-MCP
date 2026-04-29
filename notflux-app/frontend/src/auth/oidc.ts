@@ -1,17 +1,15 @@
 // ---------------------------------------------------------------------------
 // PingOne OIDC configuration using oidc-client-ts (PKCE / Authorization Code)
 //
-// Two tokens are managed:
+// The browser acquires a single person_token via PKCE login:
+//   aud=notflux-api, scope=get_media
 //
-//  1. person_token  — obtained via the primary PKCE login.
-//                     aud=notflux-api (or the PingOne NotFlux resource),
-//                     scope=get_media.  Used by the App for direct API calls.
-//
-//  2. agent_token   — obtained silently (prompt=none) after login.
-//                     aud=<VITE_PINGONE_AGENT_RESOURCE> (e.g. https://google-agent),
-//                     scope=agent-use.  Sent to the backend for Vertex Agent
-//                     sessions; the backend exchanges it for an MCP-audience
-//                     token via RFC 8693 before injecting into session state.
+// This token is used for:
+//   1. Direct NotFlux API calls (Kong validates aud + scope)
+//   2. Vertex Agent sessions — the backend performs Token Exchange (RFC 8693)
+//      person_token → mcp_token [aud=notflux-mcp] before injecting into
+//      Vertex session state.  The MCP Server rejects any token that doesn't
+//      carry aud=notflux-mcp, so the person_token can never reach it.
 // ---------------------------------------------------------------------------
 import { UserManager, WebStorageStateStore } from 'oidc-client-ts';
 
@@ -22,9 +20,6 @@ const CLIENT_ID =
   import.meta.env.VITE_PINGONE_CLIENT_ID ??
   '5d24d1a9-851e-4cfb-8f94-d23d4b8b5be2';
 
-// ---------------------------------------------------------------------------
-// (1) Primary user manager — person_token for direct API calls
-// ---------------------------------------------------------------------------
 export const userManager = new UserManager({
   authority: `https://auth.pingone.com/${ENV_ID}/as`,
   client_id: CLIENT_ID,
@@ -37,68 +32,6 @@ export const userManager = new UserManager({
   automaticSilentRenew: true,
   silent_redirect_uri: `${window.location.origin}/silent-callback`,
 });
-
-// ---------------------------------------------------------------------------
-// (2) Agent token manager — agent_token for Vertex Agent sessions
-//
-// Uses the same OIDC client with a different resource (RFC 8707) and scope.
-// PingOne will issue a token with aud=<AGENT_RESOURCE> and scope=agent-use.
-//
-// Requires the PingOne application to be authorised for the agent resource.
-// Set VITE_PINGONE_AGENT_RESOURCE and VITE_PINGONE_AGENT_SCOPE in .env to
-// activate.  If unset the agent falls back to the person_token (safe default).
-// ---------------------------------------------------------------------------
-const AGENT_RESOURCE =
-  import.meta.env.VITE_PINGONE_AGENT_RESOURCE ?? '';
-const AGENT_SCOPE =
-  import.meta.env.VITE_PINGONE_AGENT_SCOPE ?? 'openid agent-use';
-
-// Store agent tokens separately so they don't overwrite the person token.
-const agentUserManager = AGENT_RESOURCE
-  ? new UserManager({
-      authority: `https://auth.pingone.com/${ENV_ID}/as`,
-      client_id: CLIENT_ID,
-      redirect_uri: `${window.location.origin}/callback`,
-      silent_redirect_uri: `${window.location.origin}/silent-callback`,
-      scope: AGENT_SCOPE,
-      response_type: 'code',
-      // RFC 8707 resource indicator — PingOne sets this as the `aud` claim
-      extraQueryParams: { resource: AGENT_RESOURCE },
-      userStore: new WebStorageStateStore({
-        store: window.sessionStorage,
-        prefix: 'oidc.agent.',
-      }),
-      loadUserInfo: false,
-      automaticSilentRenew: true,
-    })
-  : null;
-
-/**
- * Silently acquire the agent-scoped token (prompt=none).
- * Should be called once after the primary login completes.
- * Returns null if VITE_PINGONE_AGENT_RESOURCE is not configured —
- * callers fall back to the person_token in that case.
- */
-export async function getAgentToken(): Promise<string | null> {
-  if (!agentUserManager) return null;
-
-  // Re-use a cached non-expired agent token
-  const existing = await agentUserManager.getUser();
-  if (existing && !existing.expired && existing.access_token) {
-    return existing.access_token;
-  }
-
-  try {
-    const user = await agentUserManager.signinSilent();
-    return user?.access_token ?? null;
-  } catch (e) {
-    console.warn(
-      '[NotFlux] Agent token silent acquisition failed — falling back to person_token.',
-      e
-    );
-    return null;
-  }
-}
 
 export async function signIn() {
   await userManager.signinRedirect();

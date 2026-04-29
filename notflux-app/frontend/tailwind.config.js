@@ -32,6 +32,8 @@ export default {
         'slide-in': 'slideIn 0.25s ease-out',
         'fade-in': 'fadeIn 0.2s ease-out',
         'pulse-dot': 'pulseDot 1.4s infinite',
+        'shimmer': 'shimmer 2s infinite linear',
+        'spin': 'spin 1s linear infinite',
       },
       keyframes: {
         slideIn: {
@@ -45,6 +47,13 @@ export default {
         pulseDot: {
           '0%, 80%, 100%': { transform: 'scale(0)', opacity: '0.2' },
           '40%': { transform: 'scale(1)', opacity: '1' },
+        },
+        shimmer: {
+          '0%': { backgroundPosition: '-200% 0' },
+          '100%': { backgroundPosition: '200% 0' },
+        },
+        spin: {
+          to: { transform: 'rotate(360deg)' },
         },
       },
     },

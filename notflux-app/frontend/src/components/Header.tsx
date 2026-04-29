@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { User } from 'oidc-client-ts';
 import { signOut } from '../auth/oidc';
 
@@ -10,23 +10,43 @@ interface Props {
 
 export default function Header({ user, onToggleAgent, agentOpen }: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
   const displayName =
     (user.profile.given_name as string | undefined) ??
     (user.profile.name as string | undefined) ??
     (user.profile.email as string | undefined) ??
     'User';
 
+  // Close menu when clicking outside
+  useEffect(() => {
+    if (!menuOpen) return;
+
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [menuOpen]);
+
   return (
-    <header className="fixed top-0 inset-x-0 z-40 flex items-center justify-between px-6 h-16 bg-gradient-to-b from-black/80 to-transparent backdrop-blur-sm border-b border-white/5">
+    <header 
+      className="fixed top-0 inset-x-0 z-40 flex items-center justify-between px-6 h-16 bg-gradient-to-b from-black/80 to-transparent backdrop-blur-sm border-b border-white/5"
+      role="banner"
+    >
       {/* Logo */}
-      <span className="notflux-logo text-2xl select-none">NotFlux</span>
+      <h1 className="notflux-logo text-2xl select-none" aria-label="NotFlux">
+        NotFlux
+      </h1>
 
       {/* Nav */}
-      <nav className="hidden md:flex items-center gap-6 text-sm text-text-secondary">
-        <span className="text-text-primary font-medium cursor-default">Home</span>
-        <span className="hover:text-text-primary cursor-pointer transition-colors">TV Shows</span>
-        <span className="hover:text-text-primary cursor-pointer transition-colors">Movies</span>
-        <span className="hover:text-text-primary cursor-pointer transition-colors">New &amp; Popular</span>
+      <nav className="hidden md:flex items-center gap-6 text-sm text-text-secondary" role="navigation" aria-label="Main navigation">
+        <a href="/" className="text-text-primary font-medium cursor-default" aria-current="page">Home</a>
+        <a href="#" className="hover:text-text-primary cursor-pointer transition-colors">TV Shows</a>
+        <a href="#" className="hover:text-text-primary cursor-pointer transition-colors">Movies</a>
+        <a href="#" className="hover:text-text-primary cursor-pointer transition-colors">New &amp; Popular</a>
       </nav>
 
       {/* Right controls */}
@@ -47,11 +67,13 @@ export default function Header({ user, onToggleAgent, agentOpen }: Props) {
         </button>
 
         {/* Profile menu */}
-        <div className="relative">
+        <div className="relative" ref={menuRef}>
           <button
             onClick={() => setMenuOpen((v) => !v)}
             className="w-8 h-8 rounded-full bg-gradient-to-br from-ping-blue to-ping-purple flex items-center justify-center text-white text-xs font-bold select-none hover:opacity-90 transition-opacity"
             aria-label="User menu"
+            aria-expanded={menuOpen}
+            aria-haspopup="true"
           >
             {displayName[0]?.toUpperCase() ?? 'U'}
           </button>

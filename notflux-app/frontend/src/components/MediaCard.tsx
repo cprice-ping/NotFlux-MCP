@@ -40,7 +40,7 @@ export default function MediaCard({ item, onClick }: Props) {
   return (
     <button
       onClick={() => onClick(item)}
-      className="group relative rounded-xl overflow-hidden bg-bg-card aspect-video w-full text-left cursor-pointer card-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+      className="group relative rounded-xl overflow-hidden bg-bg-card aspect-video w-full text-left cursor-pointer transition-all duration-200 hover:scale-[1.02] hover:shadow-xl hover:shadow-black/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:scale-[1.02]"
       aria-label={`View ${title}`}
     >
       {/* Thumbnail — gradient placeholder (swap for real img when available) */}
@@ -79,8 +79,8 @@ export default function MediaCard({ item, onClick }: Props) {
       )}
 
       {/* Play hint on hover */}
-      <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-        <span className="w-11 h-11 rounded-full bg-white/20 backdrop-blur-sm flex items-center justify-center">
+      <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 transition-opacity duration-200">
+        <span className="w-11 h-11 rounded-full bg-white/20 backdrop-blur-sm flex items-center justify-center transform scale-90 group-hover:scale-100 transition-transform duration-200">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="white" aria-hidden="true">
             <path d="M8 5v14l11-7z" />
           </svg>

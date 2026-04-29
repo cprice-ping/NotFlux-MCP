@@ -27,7 +27,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  const { user, agentToken } = useAuth();
+  const { user } = useAuth();
 
   return (
     <BrowserRouter>
@@ -40,7 +40,7 @@ export default function App() {
           path="/*"
           element={
             <ProtectedRoute>
-              {user ? <HomePage user={user} agentToken={agentToken} /> : null}
+              {user ? <HomePage user={user} /> : null}
             </ProtectedRoute>
           }
         />

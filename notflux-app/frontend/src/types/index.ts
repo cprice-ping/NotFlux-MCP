@@ -12,6 +12,7 @@ export interface MediaItem {
   year?: number;
   duration?: string;
   thumbnailUrl?: string;
+  drm?: string;          // DRM token for content access
   [key: string]: unknown; // tolerate additional mock fields
 }
 
@@ -35,7 +36,7 @@ export interface ChatMessage {
   role: MessageRole;
   content: string;
   streaming?: boolean; // true while the response is being streamed in
-  error?: boolean;
+  error?: boolean;     // true if this message represents an error
 }
 
 // ---------------------------------------------------------------------------
@@ -54,6 +55,8 @@ export interface AgentStreamEvent {
   text?: string;
   // Error
   error?: string;
+  code?: number;
+  message?: string;
   // Terminal sentinel forwarded by backend
   done?: boolean;
 }

@@ -1,8 +1,11 @@
 import { useState, useCallback, useRef } from 'react';
 import type { ChatMessage, AgentStreamEvent } from '../types';
 
-function uid() {
-  return Math.random().toString(36).slice(2);
+/**
+ * Generate a unique ID for chat messages.
+ */
+function uid(): string {
+  return Math.random().toString(36).slice(2, 11);
 }
 
 /** Extract the text payload from a single Agent Engine stream event */
@@ -12,7 +15,18 @@ function extractText(event: AgentStreamEvent): string {
   }
   if (typeof event.output === 'string') return event.output;
   if (typeof event.text === 'string') return event.text;
+  if (typeof event.message === 'string' && typeof event.code !== 'number') {
+    return event.message;
+  }
   return '';
+}
+
+function extractError(event: AgentStreamEvent): string | null {
+  if (event.error) return event.error;
+  if (typeof event.message === 'string' && typeof event.code === 'number') {
+    return `${event.code}: ${event.message}`;
+  }
+  return null;
 }
 
 /**
@@ -86,7 +100,7 @@ export function useAgent(agentToken: string | null, userSub?: string) {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${agentToken}`,
           },
-          body: JSON.stringify({ message: text, sessionId: sid }),
+          body: JSON.stringify({ message: text, sessionId: sid, sub: userSub ?? 'anonymous' }),
           signal: abortRef.current.signal,
         });
 
@@ -122,8 +136,9 @@ export function useAgent(agentToken: string | null, userSub?: string) {
 
             try {
               const event = JSON.parse(payload) as AgentStreamEvent;
-              if (event.error) {
-                accumulated += `\n⚠️ ${event.error}`;
+              const error = extractError(event);
+              if (error) {
+                accumulated += `\n⚠️ ${error}`;
               } else {
                 accumulated += extractText(event);
               }
