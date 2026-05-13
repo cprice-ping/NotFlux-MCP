@@ -408,16 +408,6 @@ function buildMcpServer(tokenRef: { current: string }): Server {
       };
     }
 
-    if (!hasExpectedAudience(token)) {
-      return {
-        isError: true,
-        content: [{
-          type: "text" as const,
-          text: "Invalid token audience. This endpoint requires an MCP-scoped token obtained via Token Exchange.",
-        }],
-      };
-    }
-
     switch (name) {
       case "get_all_media_metadata":
         return executeWithHitl(server, token, { method: "GET", path: "/media/metadata" });
@@ -495,6 +485,18 @@ const sessions = new Map<string, Session>();
 // POST /mcp  – handles initialize (new session) and all subsequent JSON-RPC requests
 app.post("/mcp", async (req: Request, res: Response) => {
   const token = extractBearer(req);
+
+  // Reject tokens that are present but carry the wrong audience.
+  // Returns HTTP 401 per MCP spec 2025-11-25 §Authentication.
+  // Requests with no token are allowed through so that unauthenticated
+  // initialize / tools/list (agent discovery) still works.
+  if (token && !hasExpectedAudience(token)) {
+    res.status(401)
+      .set("WWW-Authenticate", `Bearer realm="notflux-mcp", error="invalid_token", error_description="Token audience is not valid for this MCP server. Use a Token Exchange token."`)
+      .json({ error: "invalid_token", error_description: "Token audience is not valid for this MCP server. Use a Token Exchange token." });
+    return;
+  }
+
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
   // Reuse an existing session – update the token ref for this request
