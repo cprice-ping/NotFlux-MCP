@@ -14,6 +14,20 @@ import { randomUUID } from "node:crypto";
 const NOTFLUX_API_BASE = "https://notflux-api.ping-devops.com";
 const PORT = Number(process.env.PORT ?? 8080);
 
+/**
+ * The `aud` claim value that MCP-scoped tokens must carry.
+ * Set via EXPECTED_AUDIENCE env var — should match the PingOne resource
+ * that the backend Token Exchange (RFC 8693) targets (PINGONE_MCP_AUDIENCE).
+ * When unset, audience validation is skipped (useful for local dev with curl).
+ */
+const EXPECTED_AUDIENCE = process.env.EXPECTED_AUDIENCE ?? "";
+
+if (EXPECTED_AUDIENCE) {
+  console.log(`Audience validation enabled — required aud: ${EXPECTED_AUDIENCE}`);
+} else {
+  console.warn("EXPECTED_AUDIENCE not set — audience validation disabled. Set this in production.");
+}
+
 // ---------------------------------------------------------------------------
 // HITL types
 // ---------------------------------------------------------------------------
@@ -131,6 +145,41 @@ function resolveHitlHandler(error: string): HitlHandlerFn {
       },
     }))
   );
+}
+
+// ---------------------------------------------------------------------------
+// JWT audience helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Decodes the payload of a JWT (base64url) and returns the `aud` claim.
+ * Does NOT verify the signature — Kong handles that on the forwarded request.
+ * Returns null if the token is malformed.
+ */
+function jwtAudience(token: string): string | string[] | null {
+  const parts = token.split(".");
+  if (parts.length < 2) return null;
+  try {
+    const payload = JSON.parse(
+      Buffer.from(parts[1], "base64url").toString("utf8")
+    ) as Record<string, unknown>;
+    const aud = payload["aud"];
+    if (typeof aud === "string" || Array.isArray(aud)) return aud as string | string[];
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Returns true if the token's `aud` claim contains the expected audience.
+ * Always returns true when EXPECTED_AUDIENCE is not configured.
+ */
+function hasExpectedAudience(token: string): boolean {
+  if (!EXPECTED_AUDIENCE) return true;
+  const aud = jwtAudience(token);
+  if (aud === null) return false;
+  return Array.isArray(aud) ? aud.includes(EXPECTED_AUDIENCE) : aud === EXPECTED_AUDIENCE;
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +404,16 @@ function buildMcpServer(tokenRef: { current: string }): Server {
         content: [{
           type: "text" as const,
           text: "Authorization required. Send a PingOne Bearer token in the Authorization header: Bearer <token>",
+        }],
+      };
+    }
+
+    if (!hasExpectedAudience(token)) {
+      return {
+        isError: true,
+        content: [{
+          type: "text" as const,
+          text: "Invalid token audience. This endpoint requires an MCP-scoped token obtained via Token Exchange.",
         }],
       };
     }
