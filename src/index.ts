@@ -4,269 +4,249 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import express, { type NextFunction, type Request, type Response } from "express";
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import express, { type Request, type Response } from "express";
 import { randomUUID } from "node:crypto";
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-const NOTFLUX_API_BASE = process.env.NOTFLUX_API_BASE ?? "https://notflux-api.ping-devops.com";
+const NOTFLUX_API_BASE = "https://notflux-api.ping-devops.com";
 const PORT = Number(process.env.PORT ?? 8080);
 
 // ---------------------------------------------------------------------------
-// OAuth 2.0 Resource Server config (MCP spec §6, RFC 9470, RFC 6750)
-//
-// JWT validation engages when MCP_AUDIENCE is set.  Leave it unset to run
-// without local JWT checks (e.g. during initial bring-up; Kong still enforces).
-// ---------------------------------------------------------------------------
-const P1_ENV_ID   = process.env.PINGONE_ENV_ID ?? "59bb6a66-e76e-490c-b83a-884c50423da4";
-const MCP_ISSUER  = process.env.MCP_ISSUER ?? `https://auth.pingone.com/${P1_ENV_ID}/as`;
-// The `aud` claim the exchanged MCP token must carry (PingOne MCP resource audience).
-// The token's `aud` will be an ARRAY when the exchange requests scopes across multiple
-// resources (e.g. get_media + use_mcp_tools).  jose's jwtVerify checks for membership.
-const MCP_AUDIENCE = process.env.MCP_AUDIENCE ?? "";
-// The MCP-specific scope to require — should be the scope owned by this resource server
-// (e.g. use_mcp_tools), NOT get_media.  get_media is Kong/AAM's concern; use_mcp_tools
-// is proof the token was exchanged specifically for MCP access.
-// Both scopes exist on the token because the backend's Token Exchange requests them together.
-const MCP_REQUIRED_SCOPE = process.env.MCP_REQUIRED_SCOPE ?? "use_mcp_tools";
-const MCP_REQUIRED_SCOPES = MCP_REQUIRED_SCOPE.split(" ").filter(Boolean);
-// Externally-visible base URL of this server (used in WWW-Authenticate + resource metadata)
-const MCP_PUBLIC_BASE_URL =
-  process.env.MCP_PUBLIC_BASE_URL ?? "https://notflux-mcp.ping-devops.com";
-
-const JWT_VALIDATION_ENABLED = Boolean(MCP_AUDIENCE);
-
-// Lazily-initialised JWKS client — only created when validation is enabled
-// so we don't make outbound requests if the feature is off.
-const JWKS = JWT_VALIDATION_ENABLED
-  ? createRemoteJWKSet(new URL(`${MCP_ISSUER}/jwks`))
-  : null;
-
-if (JWT_VALIDATION_ENABLED) {
-  console.log(`JWT validation enabled  — issuer: ${MCP_ISSUER}, audience: ${MCP_AUDIENCE}`);
-  console.log(`Required scopes         — ${MCP_REQUIRED_SCOPES.join(" ")}`);
-} else {
-  console.log("JWT validation disabled — set MCP_AUDIENCE to enable");
-}
-
-// ---------------------------------------------------------------------------
-// JWT validation helpers
+// HITL types
 // ---------------------------------------------------------------------------
 
-type TokenFailure = "missing" | "invalid_token" | "insufficient_scope";
-
-async function validateBearerToken(
-  token: string
-): Promise<{ ok: true } | { ok: false; reason: TokenFailure }> {
-  if (!JWKS) return { ok: true }; // validation disabled — pass through
-
-  try {
-    const { payload } = await jwtVerify(token, JWKS, {
-      issuer: MCP_ISSUER,
-      audience: MCP_AUDIENCE,
-    });
-
-    // PingOne encodes scopes as a space-delimited string in the `scope` claim.
-    // Some AS implementations use `scp` (array); handle both.
-    const raw = (payload["scope"] ?? payload["scp"]) as string | string[] | undefined;
-    const tokenScopes: string[] =
-      typeof raw === "string"
-        ? raw.split(" ").filter(Boolean)
-        : Array.isArray(raw)
-          ? raw
-          : [];
-
-    const missing = MCP_REQUIRED_SCOPES.filter((s) => !tokenScopes.includes(s));
-    if (missing.length > 0) {
-      return { ok: false, reason: "insufficient_scope" };
-    }
-
-    return { ok: true };
-  } catch {
-    return { ok: false, reason: "invalid_token" };
-  }
+interface BearerChallenge {
+  /** error= from WWW-Authenticate Bearer challenge — the HITL event type */
+  error: string;
+  errorDescription: string;
+  /** acr_values= — PingOne MFA transaction handle, passed back on retry */
+  transactionId: string;
+  maxAge?: number;
 }
 
-/** RFC 6750 §3.1 — WWW-Authenticate header value for an error */
-function wwwAuthenticate(error?: "invalid_token" | "insufficient_scope"): string {
-  const parts = [
-    `Bearer realm="${MCP_PUBLIC_BASE_URL}"`,
-    `resource="${MCP_PUBLIC_BASE_URL}"`,
-  ];
-  if (error) {
-    parts.push(`error="${error}"`);
-    if (error === "insufficient_scope") {
-      parts.push(`scope="${MCP_REQUIRED_SCOPES.join(" ")}"`);
-    }
-  }
-  return parts.join(", ");
+interface RequestContext {
+  method: string;
+  path: string;
+  body?: unknown;
+  extraHeaders?: Record<string, string>;
 }
+
+type NotfluxResult =
+  | { kind: "ok";    data: unknown }
+  | { kind: "hitl";  challenge: BearerChallenge; ctx: RequestContext }
+  | { kind: "error"; message: string; status: number };
+
+interface HitlFieldSchema {
+  type: "string" | "number" | "boolean" | "integer";
+  title: string;
+  description?: string;
+  /** SDK-supported formats only */
+  format?: "email" | "uri" | "date" | "date-time";
+  minLength?: number;
+  maxLength?: number;
+  minimum?: number;
+  maximum?: number;
+}
+
+interface HitlPrompt {
+  message: string;
+  requestedSchema: {
+    type: "object";
+    properties: Record<string, HitlFieldSchema>;
+    required: string[];
+  };
+}
+
+type HitlHandlerFn = (challenge: BearerChallenge) => HitlPrompt;
+
+// ---------------------------------------------------------------------------
+// Bearer challenge parser (RFC 6750)
+// ---------------------------------------------------------------------------
 
 /**
- * Express middleware — enforces JWT on /mcp/* when JWT_VALIDATION_ENABLED.
- * Returns:
- *   401 — no token, or token fails signature / expiry / issuer / audience check
- *   403 — valid token but missing required scope
+ * Parses a WWW-Authenticate: Bearer header into a structured challenge.
+ * Returns null if the header is absent, malformed, or missing error=/acr_values=.
  */
-async function requireValidToken(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
-  if (!JWT_VALIDATION_ENABLED) return next();
-
-  const token = extractBearer(req);
-  if (!token) {
-    res.setHeader("WWW-Authenticate", wwwAuthenticate());
-    res.status(401).json({ error: "Authorization required" });
-    return;
+function parseBearerChallenge(header: string): BearerChallenge | null {
+  if (!header.toLowerCase().startsWith("bearer ")) return null;
+  const params: Record<string, string> = {};
+  const re = /(\w+)="([^"]*)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(header)) !== null) {
+    params[m[1]] = m[2];
   }
-
-  const result = await validateBearerToken(token);
-  if (!result.ok) {
-    if (result.reason === "insufficient_scope") {
-      res.setHeader("WWW-Authenticate", wwwAuthenticate("insufficient_scope"));
-      res.status(403).json({
-        error: "Insufficient scope",
-        required_scope: MCP_REQUIRED_SCOPES,
-      });
-    } else {
-      res.setHeader("WWW-Authenticate", wwwAuthenticate("invalid_token"));
-      res.status(401).json({ error: "Invalid or expired token" });
-    }
-    return;
-  }
-
-  next();
+  const error = params["error"];
+  const transactionId = params["acr_values"];
+  if (!error || !transactionId) return null;
+  return {
+    error,
+    errorDescription: params["error_description"] ?? error,
+    transactionId,
+    maxAge: params["max_age"] !== undefined ? Number(params["max_age"]) : undefined,
+  };
 }
 
 // ---------------------------------------------------------------------------
-// Second Token Exchange — MCP Server → NotFlux API  (RFC 8693)
-//
-// The MCP Server holds its own confidential client credentials (RS client).
-// On every tool call it exchanges the incoming MCP-audience token for a
-// short-lived API-audience token using that client.
-//
-// This ensures:
-//  • The agent/session state never contains a token that works directly
-//    against Kong — a stolen MCP token is useless outside the MCP Server.
-//  • sub is preserved → AAM policies still evaluate the real user.
-//  • The MCP Server is the only trusted party that can obtain an API token.
-//
-// Gated by MCP_RS_CLIENT_ID — falls back to forwarding the inbound token
-// unchanged when unset (previous behaviour, safe during bring-up).
+// HITL handler registry
+// Add new P1AZ event types here as they are built out in PingOne.
 // ---------------------------------------------------------------------------
-const P1_TOKEN_URL  = `https://auth.pingone.com/${P1_ENV_ID}/as/token`;
-const MCP_RS_CLIENT_ID     = process.env.MCP_RS_CLIENT_ID     ?? "";
-const MCP_RS_CLIENT_SECRET = process.env.MCP_RS_CLIENT_SECRET ?? "";
-// Audience of the NotFlux API resource server (what Kong/AAM validates)
-const MCP_API_AUDIENCE = process.env.MCP_API_AUDIENCE ?? "";
-// Scope(s) to request on the outbound API token
-const MCP_API_SCOPE    = process.env.MCP_API_SCOPE    ?? "get_media";
 
-const RS_EXCHANGE_ENABLED =
-  Boolean(MCP_RS_CLIENT_ID) &&
-  Boolean(MCP_RS_CLIENT_SECRET) &&
-  Boolean(MCP_API_AUDIENCE);
-
-if (RS_EXCHANGE_ENABLED) {
-  console.log(`RS Token Exchange enabled — API audience: ${MCP_API_AUDIENCE}`);
-} else {
-  console.log("RS Token Exchange disabled — set MCP_RS_CLIENT_ID/SECRET/API_AUDIENCE to enable");
-}
-
-/**
- * Exchange the inbound MCP-audience token for a short-lived API-audience
- * token the MCP Server uses to call Kong.
- *
- * The MCP Server authenticates as itself (client_secret_basic) and presents
- * the user's MCP token as the subject_token.  PingOne validates:
- *   1. The subject_token is a valid MCP-audience token for a real user
- *   2. This RS client is permitted to exchange (Token Exchange policy)
- *   3. Issues a new token: aud=<API audience>, sub=<same user>, scope=get_media
- *
- * Returns the subject_token unchanged when RS_EXCHANGE_ENABLED is false.
- */
-async function exchangeForApiToken(mcpToken: string): Promise<string> {
-  if (!RS_EXCHANGE_ENABLED) return mcpToken;
-
-  const params = new URLSearchParams({
-    grant_type:           "urn:ietf:params:oauth:grant-type:token-exchange",
-    subject_token:        mcpToken,
-    subject_token_type:   "urn:ietf:params:oauth:token-type:access_token",
-    requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
-    audience:             MCP_API_AUDIENCE,
-    scope:                MCP_API_SCOPE,
-  });
-
-  const basicCred = Buffer.from(
-    `${encodeURIComponent(MCP_RS_CLIENT_ID)}:${encodeURIComponent(MCP_RS_CLIENT_SECRET)}`
-  ).toString("base64");
-
-  const res = await fetch(P1_TOKEN_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type":  "application/x-www-form-urlencoded",
-      "Authorization": `Basic ${basicCred}`,
+const HITL_HANDLERS: Partial<Record<string, HitlHandlerFn>> = {
+  "otp-required": (c) => ({
+    message: c.errorDescription,
+    requestedSchema: {
+      type: "object",
+      properties: {
+        otp: {
+          type: "string",
+          title: "One-Time Passcode",
+          description: "Enter the OTP sent to the Primary Account Holder.",
+          minLength: 1,
+        },
+      },
+      required: ["otp"],
     },
-    body: params.toString(),
-  });
+  }),
+};
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`RS Token Exchange failed (${res.status}): ${err}`);
-  }
-
-  const data = await res.json() as { access_token?: string };
-  if (!data.access_token) {
-    throw new Error("RS Token Exchange response missing access_token");
-  }
-  return data.access_token;
+/** Falls back to a freeform text prompt for unknown HITL event types. */
+function resolveHitlHandler(error: string): HitlHandlerFn {
+  return (
+    HITL_HANDLERS[error] ??
+    ((c) => ({
+      message: c.errorDescription,
+      requestedSchema: {
+        type: "object",
+        properties: {
+          response: {
+            type: "string",
+            title: "Action Required",
+            description: c.errorDescription,
+          },
+        },
+        required: ["response"],
+      },
+    }))
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Call the NotFlux API via Kong.
- * The inbound MCP token is exchanged for an API-audience token before use,
- * so the token forwarded to Kong has aud=<notflux-api> only — constrained
- * blast radius if the token is ever intercepted at or beyond Kong.
- */
+/** Raw HTTP call to the NotFlux/Kong API. Returns a discriminated union. */
 async function notfluxRequest(
-  mcpToken: string,
-  method: string,
-  path: string,
-  body?: unknown
-): Promise<unknown> {
-  // Exchange: notflux-mcp token → notflux-api token
-  const apiToken = await exchangeForApiToken(mcpToken);
-
+  token: string,
+  ctx: RequestContext
+): Promise<NotfluxResult> {
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${apiToken}`,
+    Authorization: `Bearer ${token}`,
+    ...ctx.extraHeaders,
   };
-  if (body !== undefined) {
+  if (ctx.body !== undefined) {
     headers["Content-Type"] = "application/json";
   }
 
-  const response = await fetch(`${NOTFLUX_API_BASE}${path}`, {
-    method,
+  const response = await fetch(`${NOTFLUX_API_BASE}${ctx.path}`, {
+    method: ctx.method,
     headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    body: ctx.body !== undefined ? JSON.stringify(ctx.body) : undefined,
   });
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(
-      `NotFlux API responded with ${response.status} ${response.statusText}: ${text}`
-    );
+  if (response.ok) {
+    return { kind: "ok", data: await response.json() };
   }
 
-  return response.json();
+  if (response.status === 401) {
+    const wwwAuth = response.headers.get("www-authenticate") ?? "";
+    const challenge = parseBearerChallenge(wwwAuth);
+    if (challenge) {
+      return { kind: "hitl", challenge, ctx };
+    }
+  }
+
+  const text = await response.text();
+  return {
+    kind: "error",
+    message: `NotFlux API responded with ${response.status} ${response.statusText}: ${text}`,
+    status: response.status,
+  };
+}
+
+/**
+ * Executes a NotFlux API call, handling 401 Bearer challenges transparently
+ * via MCP Elicitation. On a HITL 401 the tool call is suspended while the
+ * user provides the required value (e.g. OTP), then the original request is
+ * retried with X-Hitl-Transaction-Id and X-Hitl-<Field> headers injected.
+ * The agent sees only the final result — the HITL exchange is invisible to it.
+ * If the MCP client does not advertise elicitation support, degrades gracefully
+ * to a standard access-denied response.
+ */
+async function executeWithHitl(
+  server: Server,
+  token: string,
+  ctx: RequestContext
+): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: true }> {
+  const result = await notfluxRequest(token, ctx);
+
+  if (result.kind === "ok") {
+    return { content: [{ type: "text" as const, text: JSON.stringify(result.data, null, 2) }] };
+  }
+
+  if (result.kind === "error") {
+    return { isError: true, content: [{ type: "text" as const, text: result.message }] };
+  }
+
+  // --- 401 Bearer challenge — HITL path ---
+  const handler = resolveHitlHandler(result.challenge.error);
+  const { message, requestedSchema } = handler(result.challenge);
+
+  try {
+    // Cast to SDK's ElicitRequestFormParams — our schema is structurally compatible
+    // but TypeScript can't narrow the union (FormParams | URLParams) from HitlPrompt.
+    const elicitation = await server.elicitInput(
+      { message, requestedSchema } as unknown as Parameters<Server["elicitInput"]>[0]
+    );
+
+    if (elicitation.action !== "accept") {
+      return {
+        isError: true,
+        content: [{ type: "text" as const, text: "Access was not authorized for this content." }],
+      };
+    }
+
+    // Inject transaction ID + one X-Hitl-<Field> header per elicited value
+    const retryHeaders: Record<string, string> = {
+      "X-Hitl-Transaction-Id": result.challenge.transactionId,
+    };
+    for (const [key, value] of Object.entries(elicitation.content ?? {})) {
+      retryHeaders[`X-Hitl-${key.charAt(0).toUpperCase()}${key.slice(1)}`] = String(value);
+    }
+
+    const retry = await notfluxRequest(token, {
+      ...result.ctx,
+      extraHeaders: { ...(result.ctx.extraHeaders ?? {}), ...retryHeaders },
+    });
+
+    if (retry.kind === "ok") {
+      return { content: [{ type: "text" as const, text: JSON.stringify(retry.data, null, 2) }] };
+    }
+
+    // Retry also denied — indistinguishable from a normal authz failure
+    return {
+      isError: true,
+      content: [{ type: "text" as const, text: "Access was not authorized for this content." }],
+    };
+  } catch {
+    // elicitInput threw — client doesn't support elicitation; degrade gracefully
+    return {
+      isError: true,
+      content: [{ type: "text" as const, text: "Access was not authorized for this content." }],
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -368,79 +348,51 @@ function buildMcpServer(tokenRef: { current: string }): Server {
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
 
-    try {
-      let data: unknown;
-
-      const token = tokenRef.current;
-      if (!token) {
-        return {
-          isError: true,
-          content: [{
-            type: "text" as const,
-            text: "Authorization required. Send an MCP Bearer token (aud=notflux-mcp, scope=use_mcp_tools) in the Authorization header.",
-          }],
-        };
-      }
-
-      switch (name) {
-        case "get_all_media_metadata": {
-          data = await notfluxRequest(token, "GET", "/media/metadata");
-          break;
-        }
-
-        case "get_media_metadata": {
-          const { id } = args as { id: string };
-          data = await notfluxRequest(
-            token,
-            "GET",
-            `/media/metadata/${encodeURIComponent(id)}`
-          );
-          break;
-        }
-
-        case "get_media_content": {
-          const { id, drm } = args as { id: string; drm: string };
-          data = await notfluxRequest(
-            token,
-            "POST",
-            `/media/content/${encodeURIComponent(id)}`,
-            { drm }
-          );
-          break;
-        }
-
-        case "get_account": {
-          const { id } = args as { id: string };
-          data = await notfluxRequest(
-            token,
-            "GET",
-            `/accounts/${encodeURIComponent(id)}`
-          );
-          break;
-        }
-
-        default:
-          return {
-            isError: true,
-            content: [{ type: "text" as const, text: `Unknown tool: ${name}` }],
-          };
-      }
-
-      return {
-        content: [
-          { type: "text" as const, text: JSON.stringify(data, null, 2) },
-        ],
-      };
-    } catch (err) {
+    const token = tokenRef.current;
+    if (!token) {
       return {
         isError: true,
-        content: [
-          {
-            type: "text" as const,
-            text: err instanceof Error ? err.message : String(err),
-          },
-        ],
+        content: [{
+          type: "text" as const,
+          text: "Authorization required. Send a PingOne Bearer token in the Authorization header: Bearer <token>",
+        }],
       };
+    }
+
+    switch (name) {
+      case "get_all_media_metadata":
+        return executeWithHitl(server, token, { method: "GET", path: "/media/metadata" });
+
+      case "get_media_metadata": {
+        const { id } = args as { id: string };
+        return executeWithHitl(server, token, {
+          method: "GET",
+          path: `/media/metadata/${encodeURIComponent(id)}`,
+        });
+      }
+
+      case "get_media_content": {
+        const { id, drm } = args as { id: string; drm: string };
+        return executeWithHitl(server, token, {
+          method: "POST",
+          path: `/media/content/${encodeURIComponent(id)}`,
+          body: { drm },
+        });
+      }
+
+      case "get_account": {
+        const { id } = args as { id: string };
+        return executeWithHitl(server, token, {
+          method: "GET",
+          path: `/accounts/${encodeURIComponent(id)}`,
+        });
+      }
+
+      default:
+        return {
+          isError: true,
+          content: [{ type: "text" as const, text: `Unknown tool: ${name}` }],
+        };
     }
   });
 
@@ -458,26 +410,17 @@ app.use(express.json());
 // Token extraction helper
 // ---------------------------------------------------------------------------
 
+/**
+ * Extracts the Bearer token from the Authorization header.
+ * Returns the token string, or an empty string if the header is absent/invalid.
+ * Auth is intentionally not enforced here so that unauthenticated requests
+ * (e.g. tools/list during agent discovery) are still served.
+ */
 function extractBearer(req: Request): string {
   const authHeader = req.headers["authorization"] ?? "";
   if (!authHeader.toLowerCase().startsWith("bearer ")) return "";
   return authHeader.slice("bearer ".length).trim();
 }
-
-// ---------------------------------------------------------------------------
-// RFC 9470 — OAuth 2.0 Protected Resource Metadata
-// MCP clients discover required scopes / auth server from here BEFORE
-// attempting to connect, so this endpoint must be publicly accessible.
-// ---------------------------------------------------------------------------
-app.get("/.well-known/oauth-protected-resource", (_req: Request, res: Response) => {
-  res.json({
-    resource: MCP_PUBLIC_BASE_URL,
-    authorization_servers: [MCP_ISSUER],
-    bearer_methods_supported: ["header"],
-    scopes_supported: MCP_REQUIRED_SCOPES,
-    resource_documentation: `${MCP_PUBLIC_BASE_URL}/docs`,
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Session registry: sessionId -> { transport, tokenRef }
@@ -491,7 +434,7 @@ interface Session {
 const sessions = new Map<string, Session>();
 
 // POST /mcp  – handles initialize (new session) and all subsequent JSON-RPC requests
-app.post("/mcp", requireValidToken, async (req: Request, res: Response) => {
+app.post("/mcp", async (req: Request, res: Response) => {
   const token = extractBearer(req);
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
 
@@ -529,7 +472,7 @@ app.post("/mcp", requireValidToken, async (req: Request, res: Response) => {
 });
 
 // GET /mcp  – SSE stream for server-to-client notifications
-app.get("/mcp", requireValidToken, async (req: Request, res: Response) => {
+app.get("/mcp", async (req: Request, res: Response) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
   const session = sessionId ? sessions.get(sessionId) : undefined;
 
@@ -543,7 +486,7 @@ app.get("/mcp", requireValidToken, async (req: Request, res: Response) => {
 });
 
 // DELETE /mcp  – explicit session termination
-app.delete("/mcp", requireValidToken, async (req: Request, res: Response) => {
+app.delete("/mcp", async (req: Request, res: Response) => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
   const session = sessionId ? sessions.get(sessionId) : undefined;
 
