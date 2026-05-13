@@ -52,17 +52,24 @@ if (EXCHANGE2_ENABLED) {
   console.warn("Exchange 2 not configured — set PINGONE_TX_CLIENT_ID/SECRET/KONG_AUDIENCE. MCP tools will fail against Kong.");
 }
 
-/** Cache: mcp_token → kong_token. Evicted when the mcp_token expires. */
+/**
+ * Cache: "<mcp_token>::<scope>" → kong_token.
+ * Keyed on both token and scope since different tools may need different scopes.
+ * Evicted after the kong_token's expires_in.
+ */
 const kongTokenCache = new Map<string, string>();
 
 /**
  * Exchange an mcp_token for a kong_token via RFC 8693 Token Exchange.
+ * @param mcpToken  The MCP-audience token received from the ADK agent.
+ * @param scope     The OAuth scope required by the target Kong endpoint.
  * Falls back to the input token when Exchange 2 is not configured (local dev).
  */
-async function exchangeForKongToken(mcpToken: string): Promise<string> {
+async function exchangeForKongToken(mcpToken: string, scope: string): Promise<string> {
   if (!EXCHANGE2_ENABLED) return mcpToken;
 
-  const cached = kongTokenCache.get(mcpToken);
+  const cacheKey = `${mcpToken}::${scope}`;
+  const cached = kongTokenCache.get(cacheKey);
   if (cached) return cached;
 
   const params = new URLSearchParams({
@@ -71,6 +78,7 @@ async function exchangeForKongToken(mcpToken: string): Promise<string> {
     subject_token_type: "urn:ietf:params:oauth:token-type:access_token",
     requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
     audience: PINGONE_KONG_AUDIENCE,
+    scope,
   });
 
   const basicCred = Buffer.from(
@@ -94,10 +102,10 @@ async function exchangeForKongToken(mcpToken: string): Promise<string> {
   const data = await res.json() as { access_token?: string; expires_in?: number };
   if (!data.access_token) throw new Error("Exchange 2 response missing access_token");
 
-  kongTokenCache.set(mcpToken, data.access_token);
+  kongTokenCache.set(cacheKey, data.access_token);
   // Evict after token expiry to avoid using stale tokens
   const ttl = (data.expires_in ?? 3600) * 1000;
-  setTimeout(() => kongTokenCache.delete(mcpToken), ttl).unref();
+  setTimeout(() => kongTokenCache.delete(cacheKey), ttl).unref();
 
   return data.access_token;
 }
@@ -311,11 +319,12 @@ async function notfluxRequest(
 async function executeWithHitl(
   server: Server,
   mcpToken: string,
-  ctx: RequestContext
+  ctx: RequestContext,
+  scope: string
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: true }> {
   let kongToken: string;
   try {
-    kongToken = await exchangeForKongToken(mcpToken);
+    kongToken = await exchangeForKongToken(mcpToken, scope);
   } catch (e) {
     return { isError: true, content: [{ type: "text" as const, text: `Token Exchange failed: ${e}` }] };
   }
@@ -491,14 +500,14 @@ function buildMcpServer(tokenRef: { current: string }): Server {
 
     switch (name) {
       case "get_all_media_metadata":
-        return executeWithHitl(server, token, { method: "GET", path: "/media/metadata" });
+        return executeWithHitl(server, token, { method: "GET", path: "/media/metadata" }, "get_media");
 
       case "get_media_metadata": {
         const { id } = args as { id: string };
         return executeWithHitl(server, token, {
           method: "GET",
           path: `/media/metadata/${encodeURIComponent(id)}`,
-        });
+        }, "get_media");
       }
 
       case "get_media_content": {
@@ -507,7 +516,7 @@ function buildMcpServer(tokenRef: { current: string }): Server {
           method: "POST",
           path: `/media/content/${encodeURIComponent(id)}`,
           body: { drm },
-        });
+        }, "get_media");
       }
 
       case "get_account": {
@@ -515,7 +524,7 @@ function buildMcpServer(tokenRef: { current: string }): Server {
         return executeWithHitl(server, token, {
           method: "GET",
           path: `/accounts/${encodeURIComponent(id)}`,
-        });
+        }, "manage_account");
       }
 
       default:
