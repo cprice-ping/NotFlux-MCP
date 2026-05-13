@@ -29,6 +29,80 @@ if (EXPECTED_AUDIENCE) {
 }
 
 // ---------------------------------------------------------------------------
+// Exchange 2: mcp_token → kong_token (RFC 8693 Token Exchange)
+// The MCP server receives an mcp-scoped token from the ADK agent, but Kong
+// requires a token with its own audience. This exchange is performed once per
+// unique mcp_token and the result is cached for the token's lifetime.
+// ---------------------------------------------------------------------------
+
+const PINGONE_ENV_ID = process.env.PINGONE_ENV_ID ?? "59bb6a66-e76e-490c-b83a-884c50423da4";
+const P1_TOKEN_URL = `https://auth.pingone.com/${PINGONE_ENV_ID}/as/token`;
+const P1_TX_CLIENT_ID = process.env.PINGONE_TX_CLIENT_ID ?? "";
+const P1_TX_CLIENT_SECRET = process.env.PINGONE_TX_CLIENT_SECRET ?? "";
+const PINGONE_KONG_AUDIENCE = process.env.PINGONE_KONG_AUDIENCE ?? "";
+
+const EXCHANGE2_ENABLED =
+  Boolean(P1_TX_CLIENT_ID) &&
+  Boolean(P1_TX_CLIENT_SECRET) &&
+  Boolean(PINGONE_KONG_AUDIENCE);
+
+if (EXCHANGE2_ENABLED) {
+  console.log(`Exchange 2 enabled — kong audience: ${PINGONE_KONG_AUDIENCE}`);
+} else {
+  console.warn("Exchange 2 not configured — set PINGONE_TX_CLIENT_ID/SECRET/KONG_AUDIENCE. MCP tools will fail against Kong.");
+}
+
+/** Cache: mcp_token → kong_token. Evicted when the mcp_token expires. */
+const kongTokenCache = new Map<string, string>();
+
+/**
+ * Exchange an mcp_token for a kong_token via RFC 8693 Token Exchange.
+ * Falls back to the input token when Exchange 2 is not configured (local dev).
+ */
+async function exchangeForKongToken(mcpToken: string): Promise<string> {
+  if (!EXCHANGE2_ENABLED) return mcpToken;
+
+  const cached = kongTokenCache.get(mcpToken);
+  if (cached) return cached;
+
+  const params = new URLSearchParams({
+    grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+    subject_token: mcpToken,
+    subject_token_type: "urn:ietf:params:oauth:token-type:access_token",
+    requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
+    audience: PINGONE_KONG_AUDIENCE,
+  });
+
+  const basicCred = Buffer.from(
+    `${encodeURIComponent(P1_TX_CLIENT_ID)}:${encodeURIComponent(P1_TX_CLIENT_SECRET)}`
+  ).toString("base64");
+
+  const res = await fetch(P1_TOKEN_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Authorization: `Basic ${basicCred}`,
+    },
+    body: params.toString(),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Exchange 2 failed (${res.status}): ${err}`);
+  }
+
+  const data = await res.json() as { access_token?: string; expires_in?: number };
+  if (!data.access_token) throw new Error("Exchange 2 response missing access_token");
+
+  kongTokenCache.set(mcpToken, data.access_token);
+  // Evict after token expiry to avoid using stale tokens
+  const ttl = (data.expires_in ?? 3600) * 1000;
+  setTimeout(() => kongTokenCache.delete(mcpToken), ttl).unref();
+
+  return data.access_token;
+}
+
+// ---------------------------------------------------------------------------
 // HITL types
 // ---------------------------------------------------------------------------
 
@@ -236,10 +310,17 @@ async function notfluxRequest(
  */
 async function executeWithHitl(
   server: Server,
-  token: string,
+  mcpToken: string,
   ctx: RequestContext
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: true }> {
-  const result = await notfluxRequest(token, ctx);
+  let kongToken: string;
+  try {
+    kongToken = await exchangeForKongToken(mcpToken);
+  } catch (e) {
+    return { isError: true, content: [{ type: "text" as const, text: `Token Exchange failed: ${e}` }] };
+  }
+
+  const result = await notfluxRequest(kongToken, ctx);
 
   if (result.kind === "ok") {
     return { content: [{ type: "text" as const, text: JSON.stringify(result.data, null, 2) }] };
@@ -275,7 +356,7 @@ async function executeWithHitl(
       retryHeaders[`X-Hitl-${key.charAt(0).toUpperCase()}${key.slice(1)}`] = String(value);
     }
 
-    const retry = await notfluxRequest(token, {
+    const retry = await notfluxRequest(kongToken, {
       ...result.ctx,
       extraHeaders: { ...(result.ctx.extraHeaders ?? {}), ...retryHeaders },
     });
