@@ -467,16 +467,17 @@ function buildMcpServer(tokenRef: { current: string }): Server {
         name: "get_account",
         title: "Get Account",
         description:
-          "Returns account details for the specified account by UUID.",
+          "Returns account details for the authenticated user or a specific account by UUID. " +
+          "If no id is provided, returns the account for the user identified by the Bearer token's sub claim.",
         inputSchema: {
           type: "object" as const,
           properties: {
             id: {
               type: "string",
-              description: "UUID of the account to look up",
+              description: "UUID of the account to look up. Omit to look up the current user's account.",
             },
           },
-          required: ["id"],
+          required: [],
         },
       },
     ],
@@ -520,11 +521,9 @@ function buildMcpServer(tokenRef: { current: string }): Server {
       }
 
       case "get_account": {
-        const { id } = args as { id: string };
-        return executeWithHitl(server, token, {
-          method: "GET",
-          path: `/accounts/${encodeURIComponent(id)}`,
-        }, "manage_account");
+        const { id } = args as { id?: string };
+        const path = id ? `/accounts/${encodeURIComponent(id)}` : "/accounts";
+        return executeWithHitl(server, token, { method: "GET", path }, "manage_account");
       }
 
       default:
