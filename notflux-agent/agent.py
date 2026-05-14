@@ -33,130 +33,93 @@ TOKEN FLOW:
                                                       │
                                                       ▼
                                         Kong Gateway + PingOne AAM
+
+DEPLOYMENT PATTERN:
+  Follows the canonical Google ADK pattern — AdkApp is passed directly to
+  ReasoningEngine.create(), NOT wrapped in a custom class.  This ensures
+  Agent Engine uses its built-in managed session service, which correctly
+  loads Vertex session state (including pingone_authorization) on every turn.
 """
 
-from typing import Any, Optional
+import logging
+from typing import Optional
 
 from google.adk.agents import llm_agent
 from google.adk.agents.callback_context import CallbackContext
-from google.adk.sessions import vertex_ai_session_service
 from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
-from google.adk.tools import agent_tool
-from google.adk.tools.google_search_tool import GoogleSearchTool
-from google.adk.tools import url_context
 from google.genai import types
-from vertexai.preview.reasoning_engines import AdkApp
 
-VertexAiSessionService = vertex_ai_session_service.VertexAiSessionService
-
-MCP_URL = 'https://notflux-mcp.ping-devops.com/mcp'
+MCP_URL = 'https://notflux-mcp.ping-devops.com/mcp?rev=2'
 
 
 def inject_mcp_auth(callback_context: CallbackContext) -> Optional[types.Content]:
-    """Rebuild the McpToolset with the session's current mcp_token before each turn.
+    """Inject per-session MCP auth before each turn.
 
-    The NotFlux App backend writes pingone_authorization into Vertex session
-    state on every /api/sessions and /api/chat call (via stateDelta) so the
-    token stays fresh across turns.
+    McpToolset connects to the MCP server lazily when tools are first resolved,
+    which happens AFTER this callback returns.  By rebuilding the toolset here
+    — before tool resolution — the correct Authorization header is used for the
+    MCP connection established during this turn.
 
-    McpToolset.get_tools() establishes the MCP connection lazily (after this
-    callback returns), so replacing the toolset here — before tool resolution —
-    ensures the correct Authorization header is used for this turn's MCP calls.
+    The agent is initialised WITHOUT a McpToolset (no unauthenticated placeholder).
+    This callback always adds a fresh authenticated one using the mcp_token from
+    Vertex session state, replacing any McpToolset from a previous turn.
 
     Returns None to let the agent continue normally.
     """
     auth = callback_context.state.get('pingone_authorization', '')
+    logging.info(f'inject_mcp_auth: auth_present={bool(auth)}')
     if not auth:
+        # No token in session state — MCP tools not available this turn.
         return None
 
-    agent = callback_context.agent
-    agent.tools = [
+    agent = callback_context._invocation_context.agent
+    non_mcp = [t for t in agent.tools if not isinstance(t, McpToolset)]
+    agent.tools = non_mcp + [
         McpToolset(
             connection_params=StreamableHTTPConnectionParams(
                 url=MCP_URL,
                 headers={'Authorization': auth},
             )
-        ) if isinstance(t, McpToolset) else t
-        for t in agent.tools
+        )
     ]
     return None
 
 
-class AgentClass:
+root_agent = llm_agent.LlmAgent(
+    name='NotFlux',
+    model='gemini-2.5-pro',
+    description='AI Assistant for the NotFlux media streaming service',
+    sub_agents=[],
+    instruction=(
+        'You are a helpful assistant for a media streaming service called NotFlux.\n\n'
+        'HITL / STEP-UP AUTH RULES — follow these strictly:\n'
+        '- Some tool calls may return a JSON object with hitl_required=true. This is not a final failure.\n'
+        '- When hitl_required=true, extract event_type, transaction_id, and message from the JSON.\n'
+        '- For event_type=otp-required: ask the user for the OTP code in conversation, then call the same tool again.\n'
+        '- On the retry, pass transaction_id and otp_code as tool arguments alongside the original inputs.\n'
+        '- Keep transaction_id internal; do not ask the user to provide it manually.\n\n'
+        'TOOL USE RULES — follow these strictly:\n'
+        '- For ANY question about what content is available on this service, what the user '
+        'can watch, or details about specific titles IN this service\'s catalogue: '
+        'call get_all_media_metadata or get_media_metadata. Never answer from your own '
+        'knowledge about what is "available" — you do not know what is in this catalogue.\n'
+        '- For ANY question about the user\'s account, profile, or subscription: '
+        'call get_account.\n'
+        '- For general entertainment knowledge (e.g. "what is the IMDB rating of MASH", '
+        '"who directed Inception"): answer from your own knowledge without calling tools.\n\n'
+        'DECISION GUIDE:\n'
+        '"What can I watch tonight?" → call get_all_media_metadata\n'
+        '"Do you have any action movies?" → call get_all_media_metadata\n'
+        '"Tell me about [title] on your service" → call get_media_metadata\n'
+        '"What is my account name?" → call get_account\n'
+        '"What is the TV show MASH rated?" → answer from knowledge\n'
+    ),
+    before_agent_callback=inject_mcp_auth,
+    tools=[
+        # No McpToolset here — inject_mcp_auth adds one with the
+        # session's mcp_token before every turn.
+    ],
+)
 
-    def __init__(self):
-        self.app = None
-
-    def session_service_builder(self):
-        return VertexAiSessionService()
-
-    def set_up(self):
-        """Sets up the ADK application.
-
-        McpToolset is included here without auth headers as a placeholder.
-        The inject_mcp_auth before_agent_callback replaces it with an
-        authenticated instance on every turn using the mcp_token from
-        Vertex session state.
-        """
-        not_flux_google_search_agent = llm_agent.LlmAgent(
-            name='NotFlux_google_search_agent',
-            model='gemini-2.5-pro',
-            description='Agent specialized in performing Google searches.',
-            sub_agents=[],
-            instruction='Use the GoogleSearchTool to find information on the web.',
-            tools=[GoogleSearchTool()],
-        )
-
-        not_flux_url_context_agent = llm_agent.LlmAgent(
-            name='NotFlux_url_context_agent',
-            model='gemini-2.5-pro',
-            description='Agent specialized in fetching content from URLs.',
-            sub_agents=[],
-            instruction='Use the UrlContextTool to retrieve content from provided URLs.',
-            tools=[url_context],
-        )
-
-        root_agent = llm_agent.LlmAgent(
-            name='NotFlux',
-            model='gemini-2.5-pro',
-            description='AI Assistant to the Media APIs used by my old NotFlux demo',
-            sub_agents=[],
-            instruction=(
-                'You are a helpful assistant for a media streaming service.\n\n'
-                'Things that are within your scope are:\n'
-                'Questions about tv shows / movies\n'
-                'Correlation between Person constraints and those media (particularly the Ratings)\n'
-                'Questions about the Account / Profile'
-            ),
-            # Injects per-session Bearer token into the MCP connection before
-            # each turn.  See inject_mcp_auth above for full explanation.
-            before_agent_callback=inject_mcp_auth,
-            tools=[
-                agent_tool.AgentTool(agent=not_flux_google_search_agent),
-                agent_tool.AgentTool(agent=not_flux_url_context_agent),
-                # Unauthenticated placeholder — replaced by inject_mcp_auth
-                # with an auth-bearing instance using the session's mcp_token.
-                McpToolset(
-                    connection_params=StreamableHTTPConnectionParams(
-                        url=MCP_URL,
-                    )
-                ),
-            ],
-        )
-
-        self.app = AdkApp(
-            agent=root_agent,
-            session_service_builder=self.session_service_builder,
-        )
-
-    async def stream_query(self, query: str, user_id: str = 'test') -> Any:
-        """Streaming query."""
-        async for chunk in self.app.async_stream_query(
-            message=query,
-            user_id=user_id,
-        ):
-            yield chunk
-
-
-app = AgentClass()
+# root_agent is exported for deploy.py to wrap in AdkApp after vertexai.init().

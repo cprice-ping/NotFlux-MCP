@@ -135,29 +135,6 @@ type NotfluxResult =
   | { kind: "hitl";  challenge: BearerChallenge; ctx: RequestContext }
   | { kind: "error"; message: string; status: number };
 
-interface HitlFieldSchema {
-  type: "string" | "number" | "boolean" | "integer";
-  title: string;
-  description?: string;
-  /** SDK-supported formats only */
-  format?: "email" | "uri" | "date" | "date-time";
-  minLength?: number;
-  maxLength?: number;
-  minimum?: number;
-  maximum?: number;
-}
-
-interface HitlPrompt {
-  message: string;
-  requestedSchema: {
-    type: "object";
-    properties: Record<string, HitlFieldSchema>;
-    required: string[];
-  };
-}
-
-type HitlHandlerFn = (challenge: BearerChallenge) => HitlPrompt;
-
 // ---------------------------------------------------------------------------
 // Bearer challenge parser (RFC 6750)
 // ---------------------------------------------------------------------------
@@ -183,50 +160,6 @@ function parseBearerChallenge(header: string): BearerChallenge | null {
     transactionId,
     maxAge: params["max_age"] !== undefined ? Number(params["max_age"]) : undefined,
   };
-}
-
-// ---------------------------------------------------------------------------
-// HITL handler registry
-// Add new P1AZ event types here as they are built out in PingOne.
-// ---------------------------------------------------------------------------
-
-const HITL_HANDLERS: Partial<Record<string, HitlHandlerFn>> = {
-  "otp-required": (c) => ({
-    message: c.errorDescription,
-    requestedSchema: {
-      type: "object",
-      properties: {
-        otp: {
-          type: "string",
-          title: "One-Time Passcode",
-          description: "Enter the OTP sent to the Primary Account Holder.",
-          minLength: 1,
-        },
-      },
-      required: ["otp"],
-    },
-  }),
-};
-
-/** Falls back to a freeform text prompt for unknown HITL event types. */
-function resolveHitlHandler(error: string): HitlHandlerFn {
-  return (
-    HITL_HANDLERS[error] ??
-    ((c) => ({
-      message: c.errorDescription,
-      requestedSchema: {
-        type: "object",
-        properties: {
-          response: {
-            type: "string",
-            title: "Action Required",
-            description: c.errorDescription,
-          },
-        },
-        required: ["response"],
-      },
-    }))
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -308,19 +241,17 @@ async function notfluxRequest(
 }
 
 /**
- * Executes a NotFlux API call, handling 401 Bearer challenges transparently
- * via MCP Elicitation. On a HITL 401 the tool call is suspended while the
- * user provides the required value (e.g. OTP), then the original request is
- * retried with X-Hitl-Transaction-Id and X-Hitl-<Field> headers injected.
- * The agent sees only the final result — the HITL exchange is invisible to it.
- * If the MCP client does not advertise elicitation support, degrades gracefully
- * to a standard access-denied response.
+ * Executes a NotFlux API call and handles 401 Bearer challenges via a
+ * conversational two-step flow suitable for ADK runtimes:
+ * 1) First call gets a challenge → return structured HITL payload.
+ * 2) Agent asks user for required input and re-calls tool with transaction_id
+ *    and otp_code, which are translated to X-Hitl-* headers on retry.
  */
 async function executeWithHitl(
-  server: Server,
   mcpToken: string,
   ctx: RequestContext,
-  scope: string
+  scope: string,
+  hitl?: { transactionId?: string; otpCode?: string }
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: true }> {
   let kongToken: string;
   try {
@@ -329,7 +260,20 @@ async function executeWithHitl(
     return { isError: true, content: [{ type: "text" as const, text: `Token Exchange failed: ${e}` }] };
   }
 
-  const result = await notfluxRequest(kongToken, ctx);
+  const hitlHeaders: Record<string, string> = {
+    ...(ctx.extraHeaders ?? {}),
+  };
+  if (hitl?.transactionId) {
+    hitlHeaders["X-Hitl-Transaction-Id"] = hitl.transactionId;
+  }
+  if (hitl?.otpCode) {
+    hitlHeaders["X-Hitl-Otp"] = hitl.otpCode;
+  }
+
+  const result = await notfluxRequest(kongToken, {
+    ...ctx,
+    extraHeaders: hitlHeaders,
+  });
 
   if (result.kind === "ok") {
     return { content: [{ type: "text" as const, text: JSON.stringify(result.data, null, 2) }] };
@@ -339,53 +283,16 @@ async function executeWithHitl(
     return { isError: true, content: [{ type: "text" as const, text: result.message }] };
   }
 
-  // --- 401 Bearer challenge — HITL path ---
-  const handler = resolveHitlHandler(result.challenge.error);
-  const { message, requestedSchema } = handler(result.challenge);
-
-  try {
-    // Cast to SDK's ElicitRequestFormParams — our schema is structurally compatible
-    // but TypeScript can't narrow the union (FormParams | URLParams) from HitlPrompt.
-    const elicitation = await server.elicitInput(
-      { message, requestedSchema } as unknown as Parameters<Server["elicitInput"]>[0]
-    );
-
-    if (elicitation.action !== "accept") {
-      return {
-        isError: true,
-        content: [{ type: "text" as const, text: "Access was not authorized for this content." }],
-      };
-    }
-
-    // Inject transaction ID + one X-Hitl-<Field> header per elicited value
-    const retryHeaders: Record<string, string> = {
-      "X-Hitl-Transaction-Id": result.challenge.transactionId,
-    };
-    for (const [key, value] of Object.entries(elicitation.content ?? {})) {
-      retryHeaders[`X-Hitl-${key.charAt(0).toUpperCase()}${key.slice(1)}`] = String(value);
-    }
-
-    const retry = await notfluxRequest(kongToken, {
-      ...result.ctx,
-      extraHeaders: { ...(result.ctx.extraHeaders ?? {}), ...retryHeaders },
-    });
-
-    if (retry.kind === "ok") {
-      return { content: [{ type: "text" as const, text: JSON.stringify(retry.data, null, 2) }] };
-    }
-
-    // Retry also denied — indistinguishable from a normal authz failure
-    return {
-      isError: true,
-      content: [{ type: "text" as const, text: "Access was not authorized for this content." }],
-    };
-  } catch {
-    // elicitInput threw — client doesn't support elicitation; degrade gracefully
-    return {
-      isError: true,
-      content: [{ type: "text" as const, text: "Access was not authorized for this content." }],
-    };
-  }
+  // --- 401 Bearer challenge — conversational HITL path ---
+  const challengePayload = {
+    hitl_required: true,
+    event_type: result.challenge.error,
+    transaction_id: result.challenge.transactionId,
+    message: result.challenge.errorDescription,
+  };
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(challengePayload, null, 2) }],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +324,17 @@ function buildMcpServer(tokenRef: { current: string }): Server {
           "AAM policy on the Kong Gateway filters results based on the user's content-rating restrictions.",
         inputSchema: {
           type: "object" as const,
+          properties: {
+            transaction_id: {
+              type: "string",
+              description: "HITL transaction id from a previous challenge response.",
+            },
+            otp_code: {
+              type: "string",
+              description: "OTP value provided by the user for HITL retries.",
+            },
+          },
+          required: [],
           additionalProperties: false,
         },
       },
@@ -435,6 +353,14 @@ function buildMcpServer(tokenRef: { current: string }): Server {
             id: {
               type: "string",
               description: "UUID of the media item",
+            },
+            transaction_id: {
+              type: "string",
+              description: "HITL transaction id from a previous challenge response.",
+            },
+            otp_code: {
+              type: "string",
+              description: "OTP value provided by the user for HITL retries.",
             },
           },
           required: ["id"],
@@ -459,6 +385,14 @@ function buildMcpServer(tokenRef: { current: string }): Server {
               type: "string",
               description: "DRM token from the get_media_metadata response",
             },
+            transaction_id: {
+              type: "string",
+              description: "HITL transaction id from a previous challenge response.",
+            },
+            otp_code: {
+              type: "string",
+              description: "OTP value provided by the user for HITL retries.",
+            },
           },
           required: ["id", "drm"],
         },
@@ -475,6 +409,14 @@ function buildMcpServer(tokenRef: { current: string }): Server {
             id: {
               type: "string",
               description: "UUID of the account to look up. Omit to look up the current user's account.",
+            },
+            transaction_id: {
+              type: "string",
+              description: "HITL transaction id from a previous challenge response.",
+            },
+            otp_code: {
+              type: "string",
+              description: "OTP value provided by the user for HITL retries.",
             },
           },
           required: [],
@@ -500,30 +442,53 @@ function buildMcpServer(tokenRef: { current: string }): Server {
     }
 
     switch (name) {
-      case "get_all_media_metadata":
-        return executeWithHitl(server, token, { method: "GET", path: "/media/metadata" }, "get_media");
+      case "get_all_media_metadata": {
+        const { transaction_id, otp_code } = args as { transaction_id?: string; otp_code?: string };
+        return executeWithHitl(token, { method: "GET", path: "/media/metadata" }, "get_media", {
+          transactionId: transaction_id,
+          otpCode: otp_code,
+        });
+      }
 
       case "get_media_metadata": {
-        const { id } = args as { id: string };
-        return executeWithHitl(server, token, {
+        const { id, transaction_id, otp_code } = args as { id: string; transaction_id?: string; otp_code?: string };
+        return executeWithHitl(token, {
           method: "GET",
           path: `/media/metadata/${encodeURIComponent(id)}`,
-        }, "get_media");
+        }, "get_media", {
+          transactionId: transaction_id,
+          otpCode: otp_code,
+        });
       }
 
       case "get_media_content": {
-        const { id, drm } = args as { id: string; drm: string };
-        return executeWithHitl(server, token, {
+        const { id, drm, transaction_id, otp_code } = args as {
+          id: string;
+          drm: string;
+          transaction_id?: string;
+          otp_code?: string;
+        };
+        return executeWithHitl(token, {
           method: "POST",
           path: `/media/content/${encodeURIComponent(id)}`,
           body: { drm },
-        }, "get_media");
+        }, "get_media", {
+          transactionId: transaction_id,
+          otpCode: otp_code,
+        });
       }
 
       case "get_account": {
-        const { id } = args as { id?: string };
+        const { id, transaction_id, otp_code } = args as {
+          id?: string;
+          transaction_id?: string;
+          otp_code?: string;
+        };
         const path = id ? `/accounts/${encodeURIComponent(id)}` : "/accounts";
-        return executeWithHitl(server, token, { method: "GET", path }, "manage_account");
+        return executeWithHitl(token, { method: "GET", path }, "manage_account", {
+          transactionId: transaction_id,
+          otpCode: otp_code,
+        });
       }
 
       default:
