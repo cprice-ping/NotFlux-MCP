@@ -75,6 +75,16 @@ function tryParseJson(value: string): unknown | null {
   }
 }
 
+function tryParseJsonFromMaybeMarkdown(value: string): unknown | null {
+  const trimmed = value.trim();
+  const direct = tryParseJson(trimmed);
+  if (direct !== null) return direct;
+
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (!fenced) return null;
+  return tryParseJson(fenced[1]);
+}
+
 function emitSse(res: express.Response, event: AgUiEventBase) {
   res.write(`data: ${JSON.stringify(event)}\n\n`);
 }
@@ -114,11 +124,17 @@ function buildResumeInstruction(
 /** Recursively scans an event payload for an MCP HITL challenge object. */
 function findHitlChallenge(value: unknown): HitlChallenge | null {
   if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
-      const parsed = tryParseJson(trimmed);
-      if (parsed !== null) {
-        const nested = findHitlChallenge(parsed);
+    const parsed = tryParseJsonFromMaybeMarkdown(value);
+    if (parsed !== null) {
+      const nested = findHitlChallenge(parsed);
+      if (nested) return nested;
+    }
+
+    const fencedWithContext = value.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (fencedWithContext) {
+      const parsedFromFence = tryParseJson(fencedWithContext[1]);
+      if (parsedFromFence !== null) {
+        const nested = findHitlChallenge(parsedFromFence);
         if (nested) return nested;
       }
     }
@@ -151,7 +167,7 @@ function findHitlChallenge(value: unknown): HitlChallenge | null {
     }
 
     if (typeof child === 'string' && child.includes('hitl_required')) {
-      const parsed = tryParseJson(child.trim());
+      const parsed = tryParseJsonFromMaybeMarkdown(child.trim());
       if (parsed !== null) {
         const found = findHitlChallenge(parsed);
         if (found) return found;
@@ -490,6 +506,18 @@ app.post('/api/chat', async (req, res) => {
                         : '';
 
                 if (text) {
+                  const challengeInText = findHitlChallenge(text);
+                  if (challengeInText) {
+                    emitInterrupt(challengeInText);
+                    continue;
+                  }
+
+                  if (interrupted) {
+                    // Ignore late assistant chunks after an interrupt payload
+                    // has been surfaced to keep the chat bubble clean.
+                    continue;
+                  }
+
                   emitSse(res, {
                     type: 'TEXT_MESSAGE_CHUNK',
                     messageId: assistantMessageId,

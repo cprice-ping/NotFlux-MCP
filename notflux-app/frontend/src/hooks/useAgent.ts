@@ -145,6 +145,7 @@ export function useAgent(agentToken: string | null, userSub?: string) {
         let buffer = '';
         let accumulated = '';
         const seenInterruptIds = new Set<string>();
+        let interrupted = false;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -172,6 +173,7 @@ export function useAgent(agentToken: string | null, userSub?: string) {
                   continue;
                 }
                 seenInterruptIds.add(interrupt.id);
+                interrupted = true;
                 setActiveHitl(interrupt);
                 const msg = interrupt.message ?? 'Verification is required to continue.';
                 accumulated += `\n\n🔐 ${msg}\nPlease complete verification to continue.`;
@@ -189,6 +191,9 @@ export function useAgent(agentToken: string | null, userSub?: string) {
               if (error) {
                 accumulated += `\n⚠️ ${error}`;
               } else {
+                if (interrupted) {
+                  continue;
+                }
                 accumulated += extractText(event);
               }
               setMessages((prev) =>
