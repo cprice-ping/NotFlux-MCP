@@ -40,15 +40,31 @@ export interface ChatMessage {
 }
 
 export interface HitlChallenge {
-  hitl_required: true;
-  event_type: string;
-  transaction_id: string;
-  message: string;
+  id: string;
+  reason: string;
+  message?: string;
+  responseSchema?: {
+    type?: string;
+    properties?: Record<string, unknown>;
+    required?: string[];
+  };
+  metadata?: {
+    event_type?: string;
+    transaction_id?: string;
+    [key: string]: unknown;
+  };
 }
 
-export interface AgUiEvent {
-  type: 'hitl_challenge';
-  challenge: HitlChallenge;
+export interface AgUiRunFinishedEvent {
+  type: 'RUN_FINISHED';
+  threadId?: string;
+  runId?: string;
+  outcome?:
+    | { type: 'success' }
+    | {
+        type: 'interrupt';
+        interrupts: HitlChallenge[];
+      };
 }
 
 // ---------------------------------------------------------------------------
@@ -57,8 +73,15 @@ export interface AgUiEvent {
 // ---------------------------------------------------------------------------
 
 export interface AgentStreamEvent {
-  // AG-UI bridge event emitted by backend
-  ag_ui?: AgUiEvent;
+  // AG-UI lifecycle / content events
+  type?: string;
+  threadId?: string;
+  runId?: string;
+  outcome?: AgUiRunFinishedEvent['outcome'];
+  messageId?: string;
+  delta?: string;
+  role?: string;
+
   // ADK streaming part format
   content?: {
     parts?: Array<{ text?: string }>;

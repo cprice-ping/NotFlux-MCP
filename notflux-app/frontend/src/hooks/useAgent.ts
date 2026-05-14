@@ -10,6 +10,9 @@ function uid(): string {
 
 /** Extract the text payload from a single Agent Engine stream event */
 function extractText(event: AgentStreamEvent): string {
+  if (event.type === 'TEXT_MESSAGE_CONTENT' || event.type === 'TEXT_MESSAGE_CHUNK') {
+    return typeof event.delta === 'string' ? event.delta : '';
+  }
   if (event.content?.parts) {
     return event.content.parts.map((p) => p.text ?? '').join('');
   }
@@ -22,6 +25,9 @@ function extractText(event: AgentStreamEvent): string {
 }
 
 function extractError(event: AgentStreamEvent): string | null {
+  if (event.type === 'RUN_ERROR' && typeof event.message === 'string') {
+    return event.message;
+  }
   if (event.error) return event.error;
   if (typeof event.message === 'string' && typeof event.code === 'number') {
     return `${event.code}: ${event.message}`;
@@ -73,7 +79,15 @@ export function useAgent(agentToken: string | null, userSub?: string) {
   }, [sessionId, agentToken, userSub]);
 
   const sendMessageCore = useCallback(
-    async (text: string, displayText?: string) => {
+    async (
+      text: string,
+      displayText?: string,
+      resume?: Array<{
+        interruptId: string;
+        status: 'resolved' | 'cancelled';
+        payload?: Record<string, unknown>;
+      }>
+    ) => {
       if (!agentToken || !text.trim() || thinking) return;
 
       // Append user message
@@ -105,7 +119,12 @@ export function useAgent(agentToken: string | null, userSub?: string) {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${agentToken}`,
           },
-          body: JSON.stringify({ message: text, sessionId: sid, sub: userSub ?? 'anonymous' }),
+          body: JSON.stringify({
+            message: text,
+            sessionId: sid,
+            sub: userSub ?? 'anonymous',
+            ...(resume && resume.length > 0 ? { resume } : {}),
+          }),
           signal: abortRef.current.signal,
         });
 
@@ -141,9 +160,16 @@ export function useAgent(agentToken: string | null, userSub?: string) {
 
             try {
               const event = JSON.parse(payload) as AgentStreamEvent;
-              if (event.ag_ui?.type === 'hitl_challenge') {
-                setActiveHitl(event.ag_ui.challenge);
-                accumulated += `\n\n🔐 ${event.ag_ui.challenge.message}\nPlease complete verification to continue.`;
+              if (
+                event.type === 'RUN_FINISHED' &&
+                event.outcome?.type === 'interrupt' &&
+                Array.isArray(event.outcome.interrupts) &&
+                event.outcome.interrupts.length > 0
+              ) {
+                const interrupt = event.outcome.interrupts[0] as HitlChallenge;
+                setActiveHitl(interrupt);
+                const msg = interrupt.message ?? 'Verification is required to continue.';
+                accumulated += `\n\n🔐 ${msg}\nPlease complete verification to continue.`;
                 setMessages((prev) =>
                   prev.map((m) =>
                     m.id === assistantId
@@ -214,16 +240,29 @@ export function useAgent(agentToken: string | null, userSub?: string) {
     async (otpCode: string) => {
       if (!activeHitl || !otpCode.trim()) return;
 
-      const hiddenInstruction = [
-        'HITL verification complete. Retry the same tool call now.',
-        `event_type: ${activeHitl.event_type}`,
-        `transaction_id: ${activeHitl.transaction_id}`,
-        `otp_code: ${otpCode.trim()}`,
-        'Use transaction_id and otp_code as tool arguments.',
-      ].join('\n');
+      const transactionId =
+        typeof activeHitl.metadata?.transaction_id === 'string'
+          ? activeHitl.metadata.transaction_id
+          : activeHitl.id;
+      const eventType =
+        typeof activeHitl.metadata?.event_type === 'string'
+          ? activeHitl.metadata.event_type
+          : 'otp-required';
+
+      const resume = [
+        {
+          interruptId: activeHitl.id,
+          status: 'resolved' as const,
+          payload: {
+            transaction_id: transactionId,
+            otp_code: otpCode.trim(),
+            event_type: eventType,
+          },
+        },
+      ];
 
       setActiveHitl(null);
-      await sendMessageCore(hiddenInstruction, 'Submitted verification code.');
+      await sendMessageCore('Resuming interrupted flow.', 'Submitted verification code.', resume);
     },
     [activeHitl, sendMessageCore]
   );

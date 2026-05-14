@@ -45,12 +45,86 @@ interface HitlChallenge {
   message: string;
 }
 
+interface AgUiInterrupt {
+  id: string;
+  reason: string;
+  message?: string;
+  responseSchema?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}
+
+interface AgUiRunFinishedOutcome {
+  type: 'success' | 'interrupt';
+  interrupts?: AgUiInterrupt[];
+}
+
+interface AgUiEventBase {
+  type: string;
+  timestamp?: number;
+}
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
 }
 
+function tryParseJson(value: string): unknown | null {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function emitSse(res: express.Response, event: AgUiEventBase) {
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+function randomId(prefix: string): string {
+  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function buildResumeInstruction(
+  resume: Array<{ interruptId: string; status: 'resolved' | 'cancelled'; payload?: unknown }>
+): string {
+  const resolved = resume.find((r) => r.status === 'resolved');
+  if (!resolved || !isRecord(resolved.payload)) {
+    return 'Human-in-the-loop step was cancelled. Continue safely and explain what is needed next.';
+  }
+
+  const payload = resolved.payload;
+  const otp = typeof payload.otp_code === 'string' ? payload.otp_code : '';
+  const transactionId =
+    typeof payload.transaction_id === 'string'
+      ? payload.transaction_id
+      : resolved.interruptId;
+  const eventType =
+    typeof payload.event_type === 'string'
+      ? payload.event_type
+      : 'otp-required';
+
+  return [
+    'HITL verification complete. Retry the same tool call now.',
+    `event_type: ${eventType}`,
+    `transaction_id: ${transactionId}`,
+    `otp_code: ${otp}`,
+    'Use transaction_id and otp_code as tool arguments.',
+  ].join('\n');
+}
+
 /** Recursively scans an event payload for an MCP HITL challenge object. */
 function findHitlChallenge(value: unknown): HitlChallenge | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      const parsed = tryParseJson(trimmed);
+      if (parsed !== null) {
+        const nested = findHitlChallenge(parsed);
+        if (nested) return nested;
+      }
+    }
+    return null;
+  }
+
   if (!isRecord(value)) return null;
 
   if (
@@ -75,6 +149,15 @@ function findHitlChallenge(value: unknown): HitlChallenge | null {
       }
       continue;
     }
+
+    if (typeof child === 'string' && child.includes('hitl_required')) {
+      const parsed = tryParseJson(child.trim());
+      if (parsed !== null) {
+        const found = findHitlChallenge(parsed);
+        if (found) return found;
+      }
+    }
+
     const found = findHitlChallenge(child);
     if (found) return found;
   }
@@ -249,12 +332,15 @@ app.post('/api/chat', async (req, res) => {
   const userToken = requireBearer(req, res);
   if (!userToken) return;
 
-  const { message, sessionId, sub: userSub } = req.body as {
+  const { message, sessionId, sub: userSub, resume } = req.body as {
     message: string;
     sessionId?: string;
     sub?: string;
+    resume?: Array<{ interruptId: string; status: 'resolved' | 'cancelled'; payload?: unknown }>;
   };
-  if (!message) return res.status(400).json({ error: 'message is required' });
+  if (!message && (!resume || resume.length === 0)) {
+    return res.status(400).json({ error: 'message or resume is required' });
+  }
 
   try {
     // Refresh the exchanged token on every turn so it stays valid.
@@ -268,10 +354,15 @@ app.post('/api/chat', async (req, res) => {
     // and optional session_id in the body — NOT /sessions/{id}:streamQuery.
     const url = `${AGENT_BASE}:streamQuery`;
 
+    const inputMessage =
+      resume && resume.length > 0
+        ? buildResumeInstruction(resume)
+        : message;
+
     const inputBody = {
       class_method: 'async_stream_query',
       input: {
-        message: message,
+        message: inputMessage,
         user_id: userSub ?? 'anonymous',
         ...(sessionId ? { session_id: sessionId } : {}),
       },
@@ -303,6 +394,18 @@ app.post('/api/chat', async (req, res) => {
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
 
+    const threadId = sessionId ?? userSub ?? 'anonymous';
+    const runId = randomId('run');
+    const assistantMessageId = randomId('msg');
+    let interrupted = false;
+
+    emitSse(res, {
+      type: 'RUN_STARTED',
+      threadId,
+      runId,
+      timestamp: Date.now(),
+    } as AgUiEventBase & { threadId: string; runId: string });
+
     const reader = upstream.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -322,24 +425,86 @@ app.post('/api/chat', async (req, res) => {
           eventCount++;
           console.log(`[chat] event #${eventCount}: ${trimmed.slice(0, 200)}`);
 
-          // Bridge MCP HITL challenge payloads into explicit AG-UI events.
-          try {
-            const parsed = JSON.parse(trimmed) as unknown;
-            const challenge = findHitlChallenge(parsed);
-            if (challenge) {
-              const uiEvent = {
-                ag_ui: {
-                  type: 'hitl_challenge',
-                  challenge,
-                },
-              };
-              res.write(`data: ${JSON.stringify(uiEvent)}\n\n`);
-            }
-          } catch {
-            // ignore non-JSON lines
-          }
+            try {
+              const parsed = JSON.parse(trimmed) as unknown;
+              const challenge = findHitlChallenge(parsed);
+              if (challenge) {
+                interrupted = true;
+                const interruptId = challenge.transaction_id || randomId('int');
+                emitSse(res, {
+                  type: 'RUN_FINISHED',
+                  threadId,
+                  runId,
+                  outcome: {
+                    type: 'interrupt',
+                    interrupts: [
+                      {
+                        id: interruptId,
+                        reason: 'input_required',
+                        message: challenge.message,
+                        responseSchema: {
+                          type: 'object',
+                          properties: {
+                            transaction_id: { type: 'string' },
+                            otp_code: { type: 'string' },
+                            event_type: { type: 'string' },
+                          },
+                          required: ['transaction_id', 'otp_code'],
+                        },
+                        metadata: {
+                          event_type: challenge.event_type,
+                          transaction_id: challenge.transaction_id,
+                        },
+                      },
+                    ],
+                  } as AgUiRunFinishedOutcome,
+                  timestamp: Date.now(),
+                } as AgUiEventBase & {
+                  threadId: string;
+                  runId: string;
+                  outcome: AgUiRunFinishedOutcome;
+                });
+                continue;
+              }
 
-          res.write(`data: ${trimmed}\n\n`);
+              if (isRecord(parsed)) {
+                const text =
+                  isRecord(parsed.content) && Array.isArray(parsed.content.parts)
+                    ? parsed.content.parts
+                        .map((p) => (isRecord(p) && typeof p.text === 'string' ? p.text : ''))
+                        .join('')
+                    : typeof parsed.output === 'string'
+                      ? parsed.output
+                      : typeof parsed.text === 'string'
+                        ? parsed.text
+                        : '';
+
+                if (text) {
+                  emitSse(res, {
+                    type: 'TEXT_MESSAGE_CHUNK',
+                    messageId: assistantMessageId,
+                    role: 'assistant',
+                    delta: text,
+                    timestamp: Date.now(),
+                  } as AgUiEventBase & {
+                    messageId: string;
+                    role: 'assistant';
+                    delta: string;
+                  });
+                  continue;
+                }
+
+                if (typeof parsed.error === 'string') {
+                  emitSse(res, {
+                    type: 'RUN_ERROR',
+                    message: parsed.error,
+                    timestamp: Date.now(),
+                  } as AgUiEventBase & { message: string });
+                }
+              }
+            } catch {
+              // ignore non-JSON lines
+            }
         }
       }
     }
@@ -352,28 +517,72 @@ app.post('/api/chat', async (req, res) => {
         const parsed = JSON.parse(buffer.trim()) as unknown;
         const challenge = findHitlChallenge(parsed);
         if (challenge) {
-          const uiEvent = {
-            ag_ui: {
-              type: 'hitl_challenge',
-              challenge,
-            },
-          };
-          res.write(`data: ${JSON.stringify(uiEvent)}\n\n`);
+          interrupted = true;
+          const interruptId = challenge.transaction_id || randomId('int');
+          emitSse(res, {
+            type: 'RUN_FINISHED',
+            threadId,
+            runId,
+            outcome: {
+              type: 'interrupt',
+              interrupts: [
+                {
+                  id: interruptId,
+                  reason: 'input_required',
+                  message: challenge.message,
+                  responseSchema: {
+                    type: 'object',
+                    properties: {
+                      transaction_id: { type: 'string' },
+                      otp_code: { type: 'string' },
+                      event_type: { type: 'string' },
+                    },
+                    required: ['transaction_id', 'otp_code'],
+                  },
+                  metadata: {
+                    event_type: challenge.event_type,
+                    transaction_id: challenge.transaction_id,
+                  },
+                },
+              ],
+            } as AgUiRunFinishedOutcome,
+            timestamp: Date.now(),
+          } as AgUiEventBase & {
+            threadId: string;
+            runId: string;
+            outcome: AgUiRunFinishedOutcome;
+          });
         }
       } catch {
         // ignore non-JSON final line
       }
-
-      res.write(`data: ${buffer.trim()}\n\n`);
     }
     console.log(`[chat] stream done — ${eventCount} events`);
-    res.write('data: [DONE]\n\n');
+
+    if (!interrupted) {
+      emitSse(res, {
+        type: 'RUN_FINISHED',
+        threadId,
+        runId,
+        outcome: { type: 'success' } as AgUiRunFinishedOutcome,
+        timestamp: Date.now(),
+      } as AgUiEventBase & {
+        threadId: string;
+        runId: string;
+        outcome: AgUiRunFinishedOutcome;
+      });
+    }
+
     res.end();
   } catch (e) {
     if (!res.headersSent) {
       res.status(500).json({ error: String(e) });
     } else {
-      res.write(`data: ${JSON.stringify({ error: String(e) })}\n\n`);
+      emitSse(res, {
+        type: 'RUN_ERROR',
+        message: String(e),
+        timestamp: Date.now(),
+      } as AgUiEventBase & { message: string });
       res.end();
     }
   }

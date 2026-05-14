@@ -183,9 +183,9 @@ export default function AgentPanel({
             <p className="text-xs uppercase tracking-wider text-amber-300 font-semibold mb-1">
               Verification Required
             </p>
-            <p className="text-sm text-text-primary mb-3">{activeHitl.message}</p>
+            <p className="text-sm text-text-primary mb-3">{activeHitl.message ?? 'Verification is required to continue.'}</p>
 
-            {activeHitl.event_type === 'otp-required' ? (
+            {(activeHitl.metadata?.event_type ?? 'otp-required') === 'otp-required' ? (
               <div className="flex items-center gap-2">
                 <input
                   value={otpCode}

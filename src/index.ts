@@ -59,6 +59,12 @@ if (EXCHANGE2_ENABLED) {
  */
 const kongTokenCache = new Map<string, string>();
 
+function tokenPreview(token: string): string {
+  if (!token) return "<empty>";
+  if (token.length <= 12) return "<redacted>";
+  return `${token.slice(0, 6)}...${token.slice(-4)}`;
+}
+
 /**
  * Exchange an mcp_token for a kong_token via RFC 8693 Token Exchange.
  * @param mcpToken  The MCP-audience token received from the ADK agent.
@@ -70,7 +76,12 @@ async function exchangeForKongToken(mcpToken: string, scope: string): Promise<st
 
   const cacheKey = `${mcpToken}::${scope}`;
   const cached = kongTokenCache.get(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    console.log(`[exchange2] cache_hit scope=${scope} token=${tokenPreview(mcpToken)}`);
+    return cached;
+  }
+
+  console.log(`[exchange2] cache_miss scope=${scope} token=${tokenPreview(mcpToken)}`);
 
   const params = new URLSearchParams({
     grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
@@ -253,10 +264,16 @@ async function executeWithHitl(
   scope: string,
   hitl?: { transactionId?: string; otpCode?: string }
 ): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: true }> {
+  console.log(
+    `[tool_http] request method=${ctx.method} path=${ctx.path} scope=${scope}` +
+      ` hitlTx=${hitl?.transactionId ? "yes" : "no"} otp=${hitl?.otpCode ? "yes" : "no"}`
+  );
+
   let kongToken: string;
   try {
     kongToken = await exchangeForKongToken(mcpToken, scope);
   } catch (e) {
+    console.error(`[tool_http] exchange2_error path=${ctx.path} scope=${scope} err=${String(e)}`);
     return { isError: true, content: [{ type: "text" as const, text: `Token Exchange failed: ${e}` }] };
   }
 
@@ -276,14 +293,20 @@ async function executeWithHitl(
   });
 
   if (result.kind === "ok") {
+    console.log(`[tool_http] ok method=${ctx.method} path=${ctx.path}`);
     return { content: [{ type: "text" as const, text: JSON.stringify(result.data, null, 2) }] };
   }
 
   if (result.kind === "error") {
+    console.error(`[tool_http] error method=${ctx.method} path=${ctx.path} status=${result.status}`);
     return { isError: true, content: [{ type: "text" as const, text: result.message }] };
   }
 
   // --- 401 Bearer challenge — conversational HITL path ---
+  console.warn(
+    `[tool_http] hitl_challenge method=${ctx.method} path=${ctx.path}` +
+      ` event=${result.challenge.error} tx=${result.challenge.transactionId}`
+  );
   const challengePayload = {
     hitl_required: true,
     event_type: result.challenge.error,
@@ -429,9 +452,11 @@ function buildMcpServer(tokenRef: { current: string }): Server {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
+    console.log(`[tool_call] start name=${name} args=${JSON.stringify(args)}`);
 
     const token = tokenRef.current;
     if (!token) {
+      console.warn(`[tool_call] denied name=${name} reason=missing_authorization`);
       return {
         isError: true,
         content: [{
@@ -444,21 +469,25 @@ function buildMcpServer(tokenRef: { current: string }): Server {
     switch (name) {
       case "get_all_media_metadata": {
         const { transaction_id, otp_code } = args as { transaction_id?: string; otp_code?: string };
-        return executeWithHitl(token, { method: "GET", path: "/media/metadata" }, "get_media", {
+        const result = await executeWithHitl(token, { method: "GET", path: "/media/metadata" }, "get_media", {
           transactionId: transaction_id,
           otpCode: otp_code,
         });
+        console.log(`[tool_call] finish name=${name} isError=${Boolean(result.isError)}`);
+        return result;
       }
 
       case "get_media_metadata": {
         const { id, transaction_id, otp_code } = args as { id: string; transaction_id?: string; otp_code?: string };
-        return executeWithHitl(token, {
+        const result = await executeWithHitl(token, {
           method: "GET",
           path: `/media/metadata/${encodeURIComponent(id)}`,
         }, "get_media", {
           transactionId: transaction_id,
           otpCode: otp_code,
         });
+        console.log(`[tool_call] finish name=${name} id=${id} isError=${Boolean(result.isError)}`);
+        return result;
       }
 
       case "get_media_content": {
@@ -468,7 +497,7 @@ function buildMcpServer(tokenRef: { current: string }): Server {
           transaction_id?: string;
           otp_code?: string;
         };
-        return executeWithHitl(token, {
+        const result = await executeWithHitl(token, {
           method: "POST",
           path: `/media/content/${encodeURIComponent(id)}`,
           body: { drm },
@@ -476,6 +505,8 @@ function buildMcpServer(tokenRef: { current: string }): Server {
           transactionId: transaction_id,
           otpCode: otp_code,
         });
+        console.log(`[tool_call] finish name=${name} id=${id} isError=${Boolean(result.isError)}`);
+        return result;
       }
 
       case "get_account": {
@@ -485,13 +516,16 @@ function buildMcpServer(tokenRef: { current: string }): Server {
           otp_code?: string;
         };
         const path = id ? `/accounts/${encodeURIComponent(id)}` : "/accounts";
-        return executeWithHitl(token, { method: "GET", path }, "manage_account", {
+        const result = await executeWithHitl(token, { method: "GET", path }, "manage_account", {
           transactionId: transaction_id,
           otpCode: otp_code,
         });
+        console.log(`[tool_call] finish name=${name} id=${id ?? "self"} isError=${Boolean(result.isError)}`);
+        return result;
       }
 
       default:
+        console.warn(`[tool_call] unknown name=${name}`);
         return {
           isError: true,
           content: [{ type: "text" as const, text: `Unknown tool: ${name}` }],
