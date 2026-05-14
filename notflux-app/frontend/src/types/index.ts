@@ -39,12 +39,26 @@ export interface ChatMessage {
   error?: boolean;     // true if this message represents an error
 }
 
+export interface HitlChallenge {
+  hitl_required: true;
+  event_type: string;
+  transaction_id: string;
+  message: string;
+}
+
+export interface AgUiEvent {
+  type: 'hitl_challenge';
+  challenge: HitlChallenge;
+}
+
 // ---------------------------------------------------------------------------
 // Vertex AI Agent Engine event shapes (NDJSON stream from backend)
 // Multiple formats depending on ADK version / agent config
 // ---------------------------------------------------------------------------
 
 export interface AgentStreamEvent {
+  // AG-UI bridge event emitted by backend
+  ag_ui?: AgUiEvent;
   // ADK streaming part format
   content?: {
     parts?: Array<{ text?: string }>;

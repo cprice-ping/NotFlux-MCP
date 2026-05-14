@@ -1,11 +1,13 @@
 import { useRef, useEffect, useState, type KeyboardEvent } from 'react';
-import type { ChatMessage } from '../types';
+import type { ChatMessage, HitlChallenge } from '../types';
 import { useFocusTrap } from '../hooks/useKeyboard';
 
 interface Props {
   messages: ChatMessage[];
   thinking: boolean;
+  activeHitl: HitlChallenge | null;
   onSend: (text: string) => void;
+  onSubmitHitlOtp: (otpCode: string) => void;
   onClear: () => void;
   onClose: () => void;
 }
@@ -33,11 +35,14 @@ const SUGGESTIONS = [
 export default function AgentPanel({
   messages,
   thinking,
+  activeHitl,
   onSend,
+  onSubmitHitlOtp,
   onClear,
   onClose,
 }: Props) {
   const [input, setInput] = useState('');
+  const [otpCode, setOtpCode] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLElement>(null);
 
@@ -62,6 +67,13 @@ export default function AgentPanel({
       e.preventDefault();
       handleSend();
     }
+  }
+
+  function handleSubmitOtp() {
+    const code = otpCode.trim();
+    if (!code) return;
+    onSubmitHitlOtp(code);
+    setOtpCode('');
   }
 
   return (
@@ -163,6 +175,38 @@ export default function AgentPanel({
               <TypingDot delay="160ms" />
               <TypingDot delay="320ms" />
             </div>
+          </div>
+        )}
+
+        {activeHitl && (
+          <div className="rounded-2xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 animate-fade-in">
+            <p className="text-xs uppercase tracking-wider text-amber-300 font-semibold mb-1">
+              Verification Required
+            </p>
+            <p className="text-sm text-text-primary mb-3">{activeHitl.message}</p>
+
+            {activeHitl.event_type === 'otp-required' ? (
+              <div className="flex items-center gap-2">
+                <input
+                  value={otpCode}
+                  onChange={(e) => setOtpCode(e.target.value)}
+                  placeholder="Enter OTP"
+                  className="flex-1 bg-bg-card border border-white/10 rounded-lg px-3 py-2 text-sm text-text-primary outline-none focus:border-accent/60"
+                  inputMode="numeric"
+                />
+                <button
+                  onClick={handleSubmitOtp}
+                  disabled={!otpCode.trim() || thinking}
+                  className="px-3 py-2 rounded-lg bg-accent text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Verify
+                </button>
+              </div>
+            ) : (
+              <p className="text-xs text-text-muted">
+                This challenge type is not yet fully rendered. Continue in chat for now.
+              </p>
+            )}
           </div>
         )}
 

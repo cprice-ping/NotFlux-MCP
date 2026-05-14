@@ -38,60 +38,45 @@ const TOKEN_EXCHANGE_ENABLED =
   Boolean(P1_TX_CLIENT_SECRET) &&
   Boolean(P1_MCP_AUDIENCE);
 
-// ---------------------------------------------------------------------------
-// Agent token scope validation
-//
-// When PINGONE_AGENT_AUDIENCE / PINGONE_AGENT_SCOPE are set, the backend
-// decodes (without full verification — no JWKS call needed here since Kong
-// and the MCP Server both re-validate) the incoming token on agent routes
-// to confirm it is the agent-scoped token and not the person_token.
-//
-// This is a lightweight defence-in-depth check.  Full JWT verification of
-// the incoming agent token would require the backend's own JWKS client and
-// is out of scope for this demo — PingOne's Token Exchange endpoint will
-// reject an invalid/expired subject_token regardless.
-// ---------------------------------------------------------------------------
-const EXPECTED_AGENT_AUDIENCE = process.env.PINGONE_AGENT_AUDIENCE ?? ''; // e.g. https://google-agent
-const EXPECTED_AGENT_SCOPE    = process.env.PINGONE_AGENT_SCOPE    ?? 'agent-use';
-
-/** Lightweight JWT payload decode (no signature verification) */
-function decodeJwtPayload(token: string): Record<string, unknown> | null {
-  try {
-    const part = token.split('.')[1];
-    if (!part) return null;
-    const json = Buffer.from(part, 'base64url').toString('utf8');
-    return JSON.parse(json) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
+interface HitlChallenge {
+  hitl_required: true;
+  event_type: string;
+  transaction_id: string;
+  message: string;
 }
 
-/**
- * Validate that the incoming token is an agent-scoped token.
- * Returns an error string when the check fails, null when it passes.
- * Only runs when PINGONE_AGENT_AUDIENCE is configured.
- */
-function checkAgentToken(token: string): string | null {
-  if (!EXPECTED_AGENT_AUDIENCE) return null; // validation not configured — skip
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
 
-  const payload = decodeJwtPayload(token);
-  if (!payload) return 'Could not decode token payload';
+/** Recursively scans an event payload for an MCP HITL challenge object. */
+function findHitlChallenge(value: unknown): HitlChallenge | null {
+  if (!isRecord(value)) return null;
 
-  // Audience check — `aud` can be a string or array per RFC 7519
-  const aud = payload['aud'];
-  const audList = Array.isArray(aud) ? aud : [aud];
-  if (!audList.includes(EXPECTED_AGENT_AUDIENCE)) {
-    return `Token audience ${JSON.stringify(aud)} does not match expected agent audience ${EXPECTED_AGENT_AUDIENCE}. ` +
-           `Are you sending the person_token instead of the agent_token?`;
+  if (
+    value.hitl_required === true &&
+    typeof value.event_type === 'string' &&
+    typeof value.transaction_id === 'string' &&
+    typeof value.message === 'string'
+  ) {
+    return {
+      hitl_required: true,
+      event_type: value.event_type,
+      transaction_id: value.transaction_id,
+      message: value.message,
+    };
   }
 
-  // Scope check
-  const rawScope = (payload['scope'] ?? payload['scp']) as string | string[] | undefined;
-  const scopes: string[] =
-    typeof rawScope === 'string' ? rawScope.split(' ') :
-    Array.isArray(rawScope)     ? rawScope : [];
-  if (!scopes.includes(EXPECTED_AGENT_SCOPE)) {
-    return `Token is missing required scope '${EXPECTED_AGENT_SCOPE}'. Scopes present: ${scopes.join(' ')}`;
+  for (const child of Object.values(value)) {
+    if (Array.isArray(child)) {
+      for (const item of child) {
+        const found = findHitlChallenge(item);
+        if (found) return found;
+      }
+      continue;
+    }
+    const found = findHitlChallenge(child);
+    if (found) return found;
   }
 
   return null;
@@ -101,11 +86,6 @@ if (TOKEN_EXCHANGE_ENABLED) {
   console.log(`Token Exchange enabled → audience: ${P1_MCP_AUDIENCE}`);
 } else {
   console.log('Token Exchange disabled — set PINGONE_TX_CLIENT_ID/SECRET/MCP_AUDIENCE to enable');
-}
-if (EXPECTED_AGENT_AUDIENCE) {
-  console.log(`Agent token validation → audience: ${EXPECTED_AGENT_AUDIENCE}, scope: ${EXPECTED_AGENT_SCOPE}`);
-} else {
-  console.log('Agent token audience validation disabled — set PINGONE_AGENT_AUDIENCE to enable');
 }
 
 /**
@@ -204,34 +184,32 @@ function requireBearer(
 // ---------------------------------------------------------------------------
 // POST /api/sessions — create a Vertex AI Agent Engine session
 //
-// Expects: Bearer agent_token (aud=google-agent, scope=agent-use)
-// The backend exchanges this for an MCP-audience token before injecting
-// it into the Vertex session state.
+// Expects: Bearer person_token (aud=notflux-api, scope=get_media)
+// The backend performs Token Exchange (RFC 8693) to obtain an mcp_token
+// [aud=notflux-mcp] before injecting it into the Vertex session state.
+// The MCP Server independently validates aud=notflux-mcp on every request,
+// so the person_token can never reach it even if forwarded by mistake.
 // ---------------------------------------------------------------------------
 app.post('/api/sessions', async (req, res) => {
   const userToken = requireBearer(req, res);
   if (!userToken) return;
 
-  const agentScopeErr = checkAgentToken(userToken);
-  if (agentScopeErr) {
-    return res.status(403).json({ error: `Invalid agent token: ${agentScopeErr}` });
-  }
-
   try {
-    // Exchange for an MCP-audience token if Token Exchange is configured.
-    // Falls back to the raw frontend token when not yet enabled.
+    // Exchange person_token → mcp_token (falls back to person_token when
+    // Token Exchange is not yet configured).
     const mcpToken = await tokenExchange(userToken);
 
     const token = await gcpToken();
     const body = {
-      user_id: (req.body.sub as string | undefined) ?? 'anonymous',
-      session_state: {
-        state: {
-          // ADK tools access this via tool_context.state['pingone_authorization']
-          pingone_authorization: `Bearer ${mcpToken}`,
-        },
+      userId: (req.body.sub as string | undefined) ?? 'anonymous',
+      // ADK reads context.state as a flat dict from sessionState — do NOT
+      // nest under a "state" key, and use camelCase for the REST API field.
+      sessionState: {
+        pingone_authorization: `Bearer ${mcpToken}`,
       },
     };
+
+    console.log(`[sessions] creating session for userId=${body.userId}`);
 
     const r = await fetch(`${AGENT_BASE}/sessions`, {
       method: 'POST',
@@ -247,9 +225,13 @@ app.post('/api/sessions', async (req, res) => {
       return res.status(r.status).json({ error: err });
     }
 
-    const session = await r.json() as { name?: string };
-    // Extract the last path segment as the session ID
-    const sessionId = session.name?.split('/').pop() ?? session.name;
+    const session = await r.json() as { name?: string; response?: { name?: string } };
+    console.log(`[sessions] response: ${JSON.stringify(session).slice(0, 400)}`);
+    // The Vertex API returns a long-running Operation. The actual session name
+    // is in response.name (.../sessions/<id>), not the top-level name which
+    // is the operation ID (.../operations/<id>).
+    const sessionName = session.response?.name ?? session.name;
+    const sessionId = sessionName?.split('/').pop() ?? sessionName;
     res.json({ sessionId, raw: session });
   } catch (e) {
     res.status(500).json({ error: String(e) });
@@ -259,7 +241,7 @@ app.post('/api/sessions', async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /api/chat — streaming chat with the Vertex AI Agent Engine
 //
-// Expects: Bearer agent_token (aud=google-agent, scope=agent-use)
+// Expects: Bearer person_token (aud=notflux-api, scope=get_media)
 // Accepts: { message: string, sessionId?: string }
 // Returns: text/event-stream (SSE) — each event is raw NDJSON from Agent Engine
 // ---------------------------------------------------------------------------
@@ -267,14 +249,10 @@ app.post('/api/chat', async (req, res) => {
   const userToken = requireBearer(req, res);
   if (!userToken) return;
 
-  const agentScopeErr = checkAgentToken(userToken);
-  if (agentScopeErr) {
-    return res.status(403).json({ error: `Invalid agent token: ${agentScopeErr}` });
-  }
-
-  const { message, sessionId } = req.body as {
+  const { message, sessionId, sub: userSub } = req.body as {
     message: string;
     sessionId?: string;
+    sub?: string;
   };
   if (!message) return res.status(400).json({ error: 'message is required' });
 
@@ -285,33 +263,22 @@ app.post('/api/chat', async (req, res) => {
 
     const token = await gcpToken();
 
-    // Choose session-based or stateless URL
-    const url = sessionId
-      ? `${AGENT_BASE}/sessions/${sessionId}:streamQuery`
-      : `${AGENT_BASE}:streamQuery`;
+    // Use the non-deprecated async_stream_query entrypoint on the deployed ADK
+    // app. It maps to POST .../reasoningEngines/{id}:streamQuery with user_id
+    // and optional session_id in the body — NOT /sessions/{id}:streamQuery.
+    const url = `${AGENT_BASE}:streamQuery`;
 
-    // Pass token in two places for maximum compatibility:
-    //  1. stateDelta  — updates session state each turn with the fresh token
-    //  2. input dict  — available as raw input to the agent
-    const inputBody = sessionId
-      ? {
-          query: {
-            parts: [{ text: message }],
-            role: 'user',
-          },
-          // Re-inject token on every turn so it stays fresh
-          stateDelta: {
-            pingone_authorization: `Bearer ${mcpToken}`,
-          },
-        }
-      : {
-          input: {
-            input: message,
-            user_metadata: {
-              pingone_authorization: `Bearer ${mcpToken}`,
-            },
-          },
-        };
+    const inputBody = {
+      class_method: 'async_stream_query',
+      input: {
+        message: message,
+        user_id: userSub ?? 'anonymous',
+        ...(sessionId ? { session_id: sessionId } : {}),
+      },
+    };
+
+    console.log(`[chat] → POST ${url}`);
+    console.log(`[chat]   body: ${JSON.stringify(inputBody)}`);
 
     const upstream = await fetch(url, {
       method: 'POST',
@@ -322,8 +289,11 @@ app.post('/api/chat', async (req, res) => {
       body: JSON.stringify(inputBody),
     });
 
+    console.log(`[chat] ← ${upstream.status} ${upstream.statusText}`);
+
     if (!upstream.ok) {
       const err = await upstream.text();
+      console.error(`[chat] upstream error body: ${err}`);
       return res.status(upstream.status).json({ error: err });
     }
 
@@ -336,6 +306,7 @@ app.post('/api/chat', async (req, res) => {
     const reader = upstream.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let eventCount = 0;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -347,11 +318,55 @@ app.post('/api/chat', async (req, res) => {
 
       for (const line of lines) {
         const trimmed = line.trim();
-        if (trimmed) res.write(`data: ${trimmed}\n\n`);
+        if (trimmed) {
+          eventCount++;
+          console.log(`[chat] event #${eventCount}: ${trimmed.slice(0, 200)}`);
+
+          // Bridge MCP HITL challenge payloads into explicit AG-UI events.
+          try {
+            const parsed = JSON.parse(trimmed) as unknown;
+            const challenge = findHitlChallenge(parsed);
+            if (challenge) {
+              const uiEvent = {
+                ag_ui: {
+                  type: 'hitl_challenge',
+                  challenge,
+                },
+              };
+              res.write(`data: ${JSON.stringify(uiEvent)}\n\n`);
+            }
+          } catch {
+            // ignore non-JSON lines
+          }
+
+          res.write(`data: ${trimmed}\n\n`);
+        }
       }
     }
 
-    if (buffer.trim()) res.write(`data: ${buffer.trim()}\n\n`);
+    if (buffer.trim()) {
+      eventCount++;
+      console.log(`[chat] event #${eventCount} (final): ${buffer.trim().slice(0, 200)}`);
+
+      try {
+        const parsed = JSON.parse(buffer.trim()) as unknown;
+        const challenge = findHitlChallenge(parsed);
+        if (challenge) {
+          const uiEvent = {
+            ag_ui: {
+              type: 'hitl_challenge',
+              challenge,
+            },
+          };
+          res.write(`data: ${JSON.stringify(uiEvent)}\n\n`);
+        }
+      } catch {
+        // ignore non-JSON final line
+      }
+
+      res.write(`data: ${buffer.trim()}\n\n`);
+    }
+    console.log(`[chat] stream done — ${eventCount} events`);
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (e) {

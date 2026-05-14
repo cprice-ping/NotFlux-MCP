@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import type { ChatMessage, AgentStreamEvent } from '../types';
+import type { ChatMessage, AgentStreamEvent, HitlChallenge } from '../types';
 
 /**
  * Generate a unique ID for chat messages.
@@ -40,6 +40,7 @@ export function useAgent(agentToken: string | null, userSub?: string) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [thinking, setThinking] = useState(false);
+  const [activeHitl, setActiveHitl] = useState<HitlChallenge | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   // Create (or re-use) an Agent Engine session tied to the current agent token
@@ -71,12 +72,16 @@ export function useAgent(agentToken: string | null, userSub?: string) {
     }
   }, [sessionId, agentToken, userSub]);
 
-  const sendMessage = useCallback(
-    async (text: string) => {
+  const sendMessageCore = useCallback(
+    async (text: string, displayText?: string) => {
       if (!agentToken || !text.trim() || thinking) return;
 
       // Append user message
-      const userMsg: ChatMessage = { id: uid(), role: 'user', content: text };
+      const userMsg: ChatMessage = {
+        id: uid(),
+        role: 'user',
+        content: displayText ?? text,
+      };
       setMessages((prev) => [...prev, userMsg]);
 
       // Reserve a streaming assistant message slot
@@ -136,6 +141,19 @@ export function useAgent(agentToken: string | null, userSub?: string) {
 
             try {
               const event = JSON.parse(payload) as AgentStreamEvent;
+              if (event.ag_ui?.type === 'hitl_challenge') {
+                setActiveHitl(event.ag_ui.challenge);
+                accumulated += `\n\n🔐 ${event.ag_ui.challenge.message}\nPlease complete verification to continue.`;
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantId
+                      ? { ...m, content: accumulated, streaming: true }
+                      : m
+                  )
+                );
+                continue;
+              }
+
               const error = extractError(event);
               if (error) {
                 accumulated += `\n⚠️ ${error}`;
@@ -185,10 +203,44 @@ export function useAgent(agentToken: string | null, userSub?: string) {
     [agentToken, thinking, ensureSession]
   );
 
+  const sendMessage = useCallback(
+    async (text: string) => {
+      await sendMessageCore(text);
+    },
+    [sendMessageCore]
+  );
+
+  const submitHitlOtp = useCallback(
+    async (otpCode: string) => {
+      if (!activeHitl || !otpCode.trim()) return;
+
+      const hiddenInstruction = [
+        'HITL verification complete. Retry the same tool call now.',
+        `event_type: ${activeHitl.event_type}`,
+        `transaction_id: ${activeHitl.transaction_id}`,
+        `otp_code: ${otpCode.trim()}`,
+        'Use transaction_id and otp_code as tool arguments.',
+      ].join('\n');
+
+      setActiveHitl(null);
+      await sendMessageCore(hiddenInstruction, 'Submitted verification code.');
+    },
+    [activeHitl, sendMessageCore]
+  );
+
   const clearMessages = useCallback(() => {
     setMessages([]);
     setSessionId(null);
+    setActiveHitl(null);
   }, []);
 
-  return { messages, thinking, sendMessage, clearMessages, sessionId };
+  return {
+    messages,
+    thinking,
+    sendMessage,
+    clearMessages,
+    sessionId,
+    activeHitl,
+    submitHitlOtp,
+  };
 }

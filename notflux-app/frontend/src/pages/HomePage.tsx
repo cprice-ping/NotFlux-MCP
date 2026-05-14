@@ -36,7 +36,14 @@ export default function HomePage({ user }: Props) {
 
   // person_token is sent to the backend, which performs Token Exchange
   // (RFC 8693) to get an MCP-audience token before the Vertex API call.
-  const { messages, thinking, sendMessage, clearMessages } = useAgent(
+  const {
+    messages,
+    thinking,
+    sendMessage,
+    clearMessages,
+    activeHitl,
+    submitHitlOtp,
+  } = useAgent(
     accessToken,
     userSub
   );
@@ -246,7 +253,9 @@ export default function HomePage({ user }: Props) {
         <AgentPanel
           messages={messages}
           thinking={thinking}
+          activeHitl={activeHitl}
           onSend={sendMessage}
+          onSubmitHitlOtp={submitHitlOtp}
           onClear={clearMessages}
           onClose={() => setAgentOpen(false)}
         />
