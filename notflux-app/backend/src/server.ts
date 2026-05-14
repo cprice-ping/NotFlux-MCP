@@ -398,6 +398,50 @@ app.post('/api/chat', async (req, res) => {
     const runId = randomId('run');
     const assistantMessageId = randomId('msg');
     let interrupted = false;
+    const emittedInterruptIds = new Set<string>();
+
+    const emitInterrupt = (challenge: HitlChallenge) => {
+      const interruptId = challenge.transaction_id || randomId('int');
+      if (emittedInterruptIds.has(interruptId)) {
+        return;
+      }
+
+      emittedInterruptIds.add(interruptId);
+      interrupted = true;
+      emitSse(res, {
+        type: 'RUN_FINISHED',
+        threadId,
+        runId,
+        outcome: {
+          type: 'interrupt',
+          interrupts: [
+            {
+              id: interruptId,
+              reason: 'input_required',
+              message: challenge.message,
+              responseSchema: {
+                type: 'object',
+                properties: {
+                  transaction_id: { type: 'string' },
+                  otp_code: { type: 'string' },
+                  event_type: { type: 'string' },
+                },
+                required: ['transaction_id', 'otp_code'],
+              },
+              metadata: {
+                event_type: challenge.event_type,
+                transaction_id: challenge.transaction_id,
+              },
+            },
+          ],
+        } as AgUiRunFinishedOutcome,
+        timestamp: Date.now(),
+      } as AgUiEventBase & {
+        threadId: string;
+        runId: string;
+        outcome: AgUiRunFinishedOutcome;
+      });
+    };
 
     emitSse(res, {
       type: 'RUN_STARTED',
@@ -429,41 +473,7 @@ app.post('/api/chat', async (req, res) => {
               const parsed = JSON.parse(trimmed) as unknown;
               const challenge = findHitlChallenge(parsed);
               if (challenge) {
-                interrupted = true;
-                const interruptId = challenge.transaction_id || randomId('int');
-                emitSse(res, {
-                  type: 'RUN_FINISHED',
-                  threadId,
-                  runId,
-                  outcome: {
-                    type: 'interrupt',
-                    interrupts: [
-                      {
-                        id: interruptId,
-                        reason: 'input_required',
-                        message: challenge.message,
-                        responseSchema: {
-                          type: 'object',
-                          properties: {
-                            transaction_id: { type: 'string' },
-                            otp_code: { type: 'string' },
-                            event_type: { type: 'string' },
-                          },
-                          required: ['transaction_id', 'otp_code'],
-                        },
-                        metadata: {
-                          event_type: challenge.event_type,
-                          transaction_id: challenge.transaction_id,
-                        },
-                      },
-                    ],
-                  } as AgUiRunFinishedOutcome,
-                  timestamp: Date.now(),
-                } as AgUiEventBase & {
-                  threadId: string;
-                  runId: string;
-                  outcome: AgUiRunFinishedOutcome;
-                });
+                emitInterrupt(challenge);
                 continue;
               }
 
@@ -517,41 +527,7 @@ app.post('/api/chat', async (req, res) => {
         const parsed = JSON.parse(buffer.trim()) as unknown;
         const challenge = findHitlChallenge(parsed);
         if (challenge) {
-          interrupted = true;
-          const interruptId = challenge.transaction_id || randomId('int');
-          emitSse(res, {
-            type: 'RUN_FINISHED',
-            threadId,
-            runId,
-            outcome: {
-              type: 'interrupt',
-              interrupts: [
-                {
-                  id: interruptId,
-                  reason: 'input_required',
-                  message: challenge.message,
-                  responseSchema: {
-                    type: 'object',
-                    properties: {
-                      transaction_id: { type: 'string' },
-                      otp_code: { type: 'string' },
-                      event_type: { type: 'string' },
-                    },
-                    required: ['transaction_id', 'otp_code'],
-                  },
-                  metadata: {
-                    event_type: challenge.event_type,
-                    transaction_id: challenge.transaction_id,
-                  },
-                },
-              ],
-            } as AgUiRunFinishedOutcome,
-            timestamp: Date.now(),
-          } as AgUiEventBase & {
-            threadId: string;
-            runId: string;
-            outcome: AgUiRunFinishedOutcome;
-          });
+          emitInterrupt(challenge);
         }
       } catch {
         // ignore non-JSON final line

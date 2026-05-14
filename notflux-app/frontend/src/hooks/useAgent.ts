@@ -144,6 +144,7 @@ export function useAgent(agentToken: string | null, userSub?: string) {
         const decoder = new TextDecoder();
         let buffer = '';
         let accumulated = '';
+        const seenInterruptIds = new Set<string>();
 
         while (true) {
           const { done, value } = await reader.read();
@@ -167,6 +168,10 @@ export function useAgent(agentToken: string | null, userSub?: string) {
                 event.outcome.interrupts.length > 0
               ) {
                 const interrupt = event.outcome.interrupts[0] as HitlChallenge;
+                if (seenInterruptIds.has(interrupt.id)) {
+                  continue;
+                }
+                seenInterruptIds.add(interrupt.id);
                 setActiveHitl(interrupt);
                 const msg = interrupt.message ?? 'Verification is required to continue.';
                 accumulated += `\n\n🔐 ${msg}\nPlease complete verification to continue.`;
