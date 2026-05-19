@@ -350,9 +350,10 @@ async function executeWithHitl(
     `[tool_http] hitl_challenge method=${ctx.method} path=${ctx.path}` +
       ` event=${result.challenge.error} tx=${result.challenge.transactionId}`
   );
-  // For qr-required, P1AZ puts the QR image URL in error_description
-  // (custom WWW-Authenticate params are stripped). Promote it to qr_code_url
-  // and replace message with a human-readable prompt.
+  // For qr-required, P1AZ puts the QR image URL directly in error_description.
+  // Promote it to qr_code_url and replace message with human-readable text.
+  // The verification code is embedded as ?code= in the URL — the frontend
+  // extracts and displays it from there.
   const isQr = result.challenge.error === "qr-required";
   const challengePayload: Record<string, unknown> = {
     hitl_required: true,
