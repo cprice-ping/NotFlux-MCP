@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import type { ChatMessage, AgentStreamEvent, HitlChallenge } from '../types';
 
 /**
@@ -47,11 +47,7 @@ export function useAgent(agentToken: string | null, userSub?: string) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [thinking, setThinking] = useState(false);
   const [activeHitl, setActiveHitl] = useState<HitlChallenge | null>(null);
-  const [qrPolling, setQrPolling] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
-  // Stable ref so polling interval closure always sees the latest activeHitl
-  const activeHitlRef = useRef<HitlChallenge | null>(null);
-  useEffect(() => { activeHitlRef.current = activeHitl; }, [activeHitl]);
 
   // Create (or re-use) an Agent Engine session tied to the current agent token
   const ensureSession = useCallback(async (): Promise<string | null> => {
@@ -287,19 +283,18 @@ export function useAgent(agentToken: string | null, userSub?: string) {
     setActiveHitl(null);
   }, []);
 
-  /** Auto-resolve a QR-code HITL after the QR has been scanned (no user input). */
+  /** Resume a QR-code HITL — user has scanned the QR and clicked confirm. */
   const submitHitlQr = useCallback(async () => {
-    const hitl = activeHitlRef.current;
-    if (!hitl) return;
+    if (!activeHitl) return;
 
     const transactionId =
-      typeof hitl.metadata?.transaction_id === 'string'
-        ? hitl.metadata.transaction_id
-        : hitl.id;
+      typeof activeHitl.metadata?.transaction_id === 'string'
+        ? activeHitl.metadata.transaction_id
+        : activeHitl.id;
 
     const resume = [
       {
-        interruptId: hitl.id,
+        interruptId: activeHitl.id,
         status: 'resolved' as const,
         payload: {
           transaction_id: transactionId,
@@ -309,50 +304,13 @@ export function useAgent(agentToken: string | null, userSub?: string) {
     ];
 
     setActiveHitl(null);
-    setQrPolling(false);
     await sendMessageCore('Resuming interrupted flow.', 'QR code scanned — resuming.', resume);
-  }, [sendMessageCore]);
+  }, [activeHitl, sendMessageCore]);
 
   /** Cancel the active HITL interrupt (OTP or QR). */
   const cancelHitl = useCallback(() => {
     setActiveHitl(null);
-    setQrPolling(false);
   }, []);
-
-  // Polling effect — runs while a qr-required HITL is active
-  useEffect(() => {
-    if (!activeHitl || activeHitl.metadata?.event_type !== 'qr-required' || !agentToken) {
-      setQrPolling(false);
-      return;
-    }
-
-    const transactionId =
-      typeof activeHitl.metadata?.transaction_id === 'string'
-        ? activeHitl.metadata.transaction_id
-        : activeHitl.id;
-
-    setQrPolling(true);
-    const interval = window.setInterval(async () => {
-      try {
-        const r = await fetch(`/api/hitl/status/${encodeURIComponent(transactionId)}`, {
-          headers: { Authorization: `Bearer ${agentToken}` },
-        });
-        if (!r.ok) return;
-        const data = await r.json() as { status?: string };
-        if (data.status === 'scanned' || data.status === 'completed') {
-          clearInterval(interval);
-          submitHitlQr();
-        }
-      } catch {
-        // network errors — keep polling
-      }
-    }, 3000);
-
-    return () => {
-      clearInterval(interval);
-      setQrPolling(false);
-    };
-  }, [activeHitl, agentToken, submitHitlQr]);
 
   return {
     messages,
@@ -361,7 +319,6 @@ export function useAgent(agentToken: string | null, userSub?: string) {
     clearMessages,
     sessionId,
     activeHitl,
-    qrPolling,
     submitHitlOtp,
     submitHitlQr,
     cancelHitl,

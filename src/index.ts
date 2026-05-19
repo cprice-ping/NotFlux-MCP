@@ -364,7 +364,9 @@ async function executeWithHitl(
       : result.challenge.errorDescription,
   };
   if (isQr && result.challenge.errorDescription) {
-    challengePayload.qr_code_url = result.challenge.errorDescription;
+    // Strip any trailing ")" that may appear if the policy template wraps the
+    // URL in parentheses and hasn't been simplified to a bare URL yet.
+    challengePayload.qr_code_url = result.challenge.errorDescription.trim().replace(/\)+$/, "");
   }
   return {
     content: [{ type: "text" as const, text: JSON.stringify(challengePayload, null, 2) }],

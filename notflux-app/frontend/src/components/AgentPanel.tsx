@@ -6,9 +6,9 @@ interface Props {
   messages: ChatMessage[];
   thinking: boolean;
   activeHitl: HitlChallenge | null;
-  qrPolling: boolean;
   onSend: (text: string) => void;
   onSubmitHitlOtp: (otpCode: string) => void;
+  onSubmitHitlQr: () => void;
   onCancelHitl: () => void;
   onClear: () => void;
   onClose: () => void;
@@ -51,9 +51,9 @@ export default function AgentPanel({
   messages,
   thinking,
   activeHitl,
-  qrPolling,
   onSend,
   onSubmitHitlOtp,
+  onSubmitHitlQr,
   onCancelHitl,
   onClear,
   onClose,
@@ -227,21 +227,21 @@ export default function AgentPanel({
                 ) : (
                   <p className="text-xs text-text-muted">QR code not yet available.</p>
                 )}
-                <div className="flex items-center gap-2 text-xs text-amber-300">
-                  {qrPolling && (
-                    <>
-                      <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" aria-hidden="true" />
-                      <span>Waiting for scan…</span>
-                    </>
-                  )}
-                  {!qrPolling && <span>Scan with your mobile device to continue.</span>}
+                <div className="flex items-center gap-2 w-full">
+                  <button
+                    onClick={onSubmitHitlQr}
+                    disabled={thinking}
+                    className="flex-1 px-3 py-2 rounded-lg bg-accent text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    I've scanned it
+                  </button>
+                  <button
+                    onClick={onCancelHitl}
+                    className="px-3 py-2 rounded-lg text-text-muted hover:text-text-secondary text-sm"
+                  >
+                    Cancel
+                  </button>
                 </div>
-                <button
-                  onClick={onCancelHitl}
-                  className="text-xs text-text-muted hover:text-text-secondary underline"
-                >
-                  Cancel
-                </button>
               </div>
             ) : (
               /* ---- OTP challenge ---- */

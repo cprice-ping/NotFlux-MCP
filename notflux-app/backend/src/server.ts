@@ -609,44 +609,6 @@ app.post('/api/chat', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/hitl/status/:transactionId — poll QR-code HITL scan status
-//
-// The frontend polls this endpoint while showing the QR display. The backend
-// proxies to the NotFlux API's status endpoint using the user's mcp_token.
-// Response: { status: 'pending' | 'scanned' | 'completed' | 'expired' | 'error' }
-// ---------------------------------------------------------------------------
-app.get('/api/hitl/status/:transactionId', async (req, res) => {
-  const userToken = requireBearer(req, res);
-  if (!userToken) return;
-
-  const { transactionId } = req.params;
-  if (!transactionId) {
-    return res.status(400).json({ error: 'transactionId is required' });
-  }
-
-  try {
-    const mcpToken = await tokenExchange(userToken);
-    const r = await fetch(
-      `${NOTFLUX_API}/hitl/qr/status/${encodeURIComponent(transactionId)}`,
-      { headers: { Authorization: `Bearer ${mcpToken}` } }
-    );
-
-    if (!r.ok) {
-      const detail = await r.text();
-      console.warn(`[hitl/status] upstream error tx=${transactionId} status=${r.status}`);
-      return res.status(r.status).json({ status: 'error', detail });
-    }
-
-    const data = await r.json() as Record<string, unknown>;
-    console.log(`[hitl/status] tx=${transactionId} status=${JSON.stringify(data.status)}`);
-    return res.json(data);
-  } catch (e) {
-    console.error(`[hitl/status] error tx=${transactionId} err=${String(e)}`);
-    return res.status(500).json({ status: 'error', detail: String(e) });
-  }
-});
-
-// ---------------------------------------------------------------------------
 // NotFlux API proxy — forwards requests to the NotFlux/Kong API
 // Avoids CORS issues in local dev; production can call the external API directly
 // ---------------------------------------------------------------------------
