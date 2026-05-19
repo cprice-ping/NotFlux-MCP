@@ -17,13 +17,20 @@ Usage:
 """
 
 import argparse
+import os
 import vertexai
-from vertexai.preview.reasoning_engines import ReasoningEngine
+from vertexai.agent_engines import AgentEngine, AdkApp
 
-from agent import app
+# Change to the script's directory so extra_packages relative paths resolve correctly.
+# This ensures 'agent.py' is bundled as 'agent.py' (not a deep absolute path)
+# in the tar uploaded to the staging bucket.
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+from agent import root_agent
 
 PROJECT_ID = '3682147732'
 LOCATION = 'us-west1'
+STAGING_BUCKET = 'gs://notflux-agent-staging'  # must exist in the project
 
 REQUIREMENTS = [
     'google-cloud-aiplatform[adk,reasoningengine]',
@@ -31,12 +38,13 @@ REQUIREMENTS = [
 ]
 
 
-def create_agent() -> ReasoningEngine:
-    vertexai.init(project=PROJECT_ID, location=LOCATION)
-    app.set_up()
-    engine = ReasoningEngine.create(
-        app.app,
+def create_agent() -> AgentEngine:
+    vertexai.init(project=PROJECT_ID, location=LOCATION, staging_bucket=STAGING_BUCKET)
+    app = AdkApp(agent=root_agent)
+    engine = AgentEngine.create(
+        app,
         requirements=REQUIREMENTS,
+        extra_packages=['agent.py'],
         display_name='NotFlux',
         description='NotFlux AI assistant with per-session authenticated MCP tool access',
     )
@@ -48,13 +56,14 @@ def create_agent() -> ReasoningEngine:
     return engine
 
 
-def update_agent(resource_id: str) -> ReasoningEngine:
-    vertexai.init(project=PROJECT_ID, location=LOCATION)
-    app.set_up()
-    engine = ReasoningEngine(resource_id)
+def update_agent(resource_id: str) -> AgentEngine:
+    vertexai.init(project=PROJECT_ID, location=LOCATION, staging_bucket=STAGING_BUCKET)
+    app = AdkApp(agent=root_agent)
+    engine = AgentEngine(resource_id)
     engine.update(
-        app.app,
+        agent_engine=app,
         requirements=REQUIREMENTS,
+        extra_packages=['agent.py'],
     )
     print(f'Updated: {engine.resource_name}')
     return engine

@@ -208,6 +208,29 @@ function hasExpectedAudience(token: string): boolean {
   return Array.isArray(aud) ? aud.includes(EXPECTED_AUDIENCE) : aud === EXPECTED_AUDIENCE;
 }
 
+/**
+ * Accepts either:
+ * - UUID (d6df...)
+ * - managed reference (managed/primaryAccount/d6df...)
+ * and returns managed/primaryAccount/<id>.
+ */
+function normalizePrimaryRef(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (trimmed.startsWith("managed/primaryAccount/")) return trimmed;
+    return `managed/primaryAccount/${trimmed}`;
+  }
+
+  if (!value || typeof value !== "object") return null;
+
+  const rec = value as Record<string, unknown>;
+  if (typeof rec._ref === "string") return normalizePrimaryRef(rec._ref);
+  if (typeof rec.associatedPrimary === "string") return normalizePrimaryRef(rec.associatedPrimary);
+
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -232,7 +255,27 @@ async function notfluxRequest(
   });
 
   if (response.ok) {
-    return { kind: "ok", data: await response.json() };
+    if (response.status === 204) {
+      return { kind: "ok", data: { success: true, status: response.status } };
+    }
+
+    const text = await response.text();
+    if (!text.trim()) {
+      return { kind: "ok", data: { success: true, status: response.status } };
+    }
+
+    try {
+      return { kind: "ok", data: JSON.parse(text) };
+    } catch {
+      return {
+        kind: "ok",
+        data: {
+          success: true,
+          status: response.status,
+          body: text,
+        },
+      };
+    }
   }
 
   if (response.status === 401) {
@@ -347,16 +390,7 @@ function buildMcpServer(tokenRef: { current: string }): Server {
           "AAM policy on the Kong Gateway filters results based on the user's content-rating restrictions.",
         inputSchema: {
           type: "object" as const,
-          properties: {
-            transaction_id: {
-              type: "string",
-              description: "HITL transaction id from a previous challenge response.",
-            },
-            otp_code: {
-              type: "string",
-              description: "OTP value provided by the user for HITL retries.",
-            },
-          },
+          properties: {},
           required: [],
           additionalProperties: false,
         },
@@ -376,14 +410,6 @@ function buildMcpServer(tokenRef: { current: string }): Server {
             id: {
               type: "string",
               description: "UUID of the media item",
-            },
-            transaction_id: {
-              type: "string",
-              description: "HITL transaction id from a previous challenge response.",
-            },
-            otp_code: {
-              type: "string",
-              description: "OTP value provided by the user for HITL retries.",
             },
           },
           required: ["id"],
@@ -433,16 +459,79 @@ function buildMcpServer(tokenRef: { current: string }): Server {
               type: "string",
               description: "UUID of the account to look up. Omit to look up the current user's account.",
             },
-            transaction_id: {
-              type: "string",
-              description: "HITL transaction id from a previous challenge response.",
-            },
-            otp_code: {
-              type: "string",
-              description: "OTP value provided by the user for HITL retries.",
-            },
           },
           required: [],
+        },
+      },
+      {
+        name: "create_profile",
+        title: "Create Profile",
+        description:
+          "Creates a new profile under a primary account. " +
+          "Requires scope 'manage_profiles'. " +
+          "Use get_account first, then pass associated_primary_id as associatedPrimary " +
+          "(UUID) or pass associated_primary_ref as managed/primaryAccount/{id}.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            name: {
+              type: "string",
+              description: "Display name of the profile to create.",
+            },
+            email: {
+              type: "string",
+              description: "Email address for the profile.",
+            },
+            associated_primary_id: {
+              type: "string",
+              description: "Primary account UUID from get_account.associatedPrimary.",
+            },
+            associated_primary_ref: {
+              type: "string",
+              description: "Managed reference form: managed/primaryAccount/{id}.",
+            },
+            account: {
+              type: "object",
+              description: "Optional raw get_account response object containing associatedPrimary.",
+              additionalProperties: true,
+            },
+          },
+          required: ["name", "email"],
+        },
+      },
+      {
+        name: "delete_profile",
+        title: "Delete Profile",
+        description:
+          "Deletes a profile by profile UUID. " +
+          "Requires scope 'manage_profiles'.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            profile_id: {
+              type: "string",
+              description: "UUID of the profile to delete.",
+            },
+          },
+          required: ["profile_id"],
+        },
+      },
+      {
+        name: "get_primary_account",
+        title: "Get Primary Account",
+        description:
+          "Returns primary account details using the primary account UUID. " +
+          "Use get_account() and pass its associatedPrimary value as account_id. " +
+          "Requires scope 'manage_profiles'.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            account_id: {
+              type: "string",
+              description: "Primary account UUID (for example from get_account.associatedPrimary).",
+            },
+          },
+          required: ["account_id"],
         },
       },
     ],
@@ -468,24 +557,17 @@ function buildMcpServer(tokenRef: { current: string }): Server {
 
     switch (name) {
       case "get_all_media_metadata": {
-        const { transaction_id, otp_code } = args as { transaction_id?: string; otp_code?: string };
-        const result = await executeWithHitl(token, { method: "GET", path: "/media/metadata" }, "get_media", {
-          transactionId: transaction_id,
-          otpCode: otp_code,
-        });
+        const result = await executeWithHitl(token, { method: "GET", path: "/media/metadata" }, "get_media");
         console.log(`[tool_call] finish name=${name} isError=${Boolean(result.isError)}`);
         return result;
       }
 
       case "get_media_metadata": {
-        const { id, transaction_id, otp_code } = args as { id: string; transaction_id?: string; otp_code?: string };
+        const { id } = args as { id: string };
         const result = await executeWithHitl(token, {
           method: "GET",
           path: `/media/metadata/${encodeURIComponent(id)}`,
-        }, "get_media", {
-          transactionId: transaction_id,
-          otpCode: otp_code,
-        });
+        }, "get_media");
         console.log(`[tool_call] finish name=${name} id=${id} isError=${Boolean(result.isError)}`);
         return result;
       }
@@ -510,17 +592,87 @@ function buildMcpServer(tokenRef: { current: string }): Server {
       }
 
       case "get_account": {
-        const { id, transaction_id, otp_code } = args as {
-          id?: string;
-          transaction_id?: string;
-          otp_code?: string;
-        };
+        const { id } = args as { id?: string };
         const path = id ? `/accounts/${encodeURIComponent(id)}` : "/accounts";
-        const result = await executeWithHitl(token, { method: "GET", path }, "manage_account", {
-          transactionId: transaction_id,
-          otpCode: otp_code,
-        });
+        const result = await executeWithHitl(token, { method: "GET", path }, "manage_account");
         console.log(`[tool_call] finish name=${name} id=${id ?? "self"} isError=${Boolean(result.isError)}`);
+        return result;
+      }
+
+      case "create_profile": {
+        const {
+          name: profileName,
+          email,
+          associated_primary_id,
+          associated_primary_ref,
+          account,
+        } = args as {
+          name: string;
+          email: string;
+          associated_primary_id?: string;
+          associated_primary_ref?: string;
+          account?: unknown;
+        };
+
+        const primaryRef =
+          normalizePrimaryRef(associated_primary_ref) ??
+          normalizePrimaryRef(associated_primary_id) ??
+          normalizePrimaryRef(account);
+
+        if (!primaryRef) {
+          return {
+            isError: true,
+            content: [{
+              type: "text" as const,
+              text:
+                "Missing associated primary account reference. Provide associated_primary_id (UUID), " +
+                "associated_primary_ref (managed/primaryAccount/{id}), or account from get_account().",
+            }],
+          };
+        }
+
+        const result = await executeWithHitl(token, {
+          method: "POST",
+          path: "/profiles/profile",
+          body: {
+            name: profileName,
+            email,
+            associatedPrimary: { _ref: primaryRef },
+          },
+        }, "manage_profiles");
+
+        console.log(
+          `[tool_call] finish name=${name} email=${email} primaryRef=${primaryRef} isError=${Boolean(result.isError)}`
+        );
+        return result;
+      }
+
+      case "delete_profile": {
+        const { profile_id } = args as { profile_id: string };
+
+        const result = await executeWithHitl(token, {
+          method: "DELETE",
+          path: `/profiles/profile/${encodeURIComponent(profile_id)}`,
+        }, "manage_profiles");
+
+        console.log(
+          `[tool_call] finish name=${name} profile_id=${profile_id} isError=${Boolean(result.isError)}`
+        );
+        return result;
+      }
+
+      case "get_primary_account": {
+        const { account_id } = args as { account_id: string };
+        const fields = encodeURIComponent("*,*_ref/*");
+
+        const result = await executeWithHitl(token, {
+          method: "GET",
+          path: `/profiles/primaryAccount/${encodeURIComponent(account_id)}?_fields=${fields}`,
+        }, "manage_profiles");
+
+        console.log(
+          `[tool_call] finish name=${name} account_id=${account_id} isError=${Boolean(result.isError)}`
+        );
         return result;
       }
 

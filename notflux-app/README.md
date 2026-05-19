@@ -78,7 +78,7 @@ The important detail is that the step-up requirement is a **policy decision**, n
 
 ```bash
 cd notflux-app
-cp .env.example backend/.env
+cp backend/.env.example backend/.env
 npm install
 npm run dev
 ```

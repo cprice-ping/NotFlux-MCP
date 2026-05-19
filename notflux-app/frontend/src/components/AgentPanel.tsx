@@ -222,9 +222,9 @@ export default function AgentPanel({
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="Ask about your content…"
-            rows={1}
+            rows={3}
             style={{ resize: 'none' }}
-            className="flex-1 bg-transparent text-sm text-text-primary placeholder-text-muted outline-none min-h-[24px] max-h-32 overflow-y-auto"
+            className="flex-1 bg-transparent text-sm text-text-primary placeholder-text-muted outline-none min-h-[60px] max-h-48 overflow-y-auto"
           />
           <button
             onClick={handleSend}
