@@ -8,8 +8,23 @@ interface Props {
   activeHitl: HitlChallenge | null;
   onSend: (text: string) => void;
   onSubmitHitlOtp: (otpCode: string) => void;
+  onSubmitHitlQr: () => void;
+  onCancelHitl: () => void;
   onClear: () => void;
   onClose: () => void;
+}
+
+/**
+ * Extracts the `code=` query parameter from a P1AZ QR image URL.
+ * e.g. https://api.pingone.com/v1/idValidations/webVerifications/<id>/qr?code=367658
+ * Returns null if the URL is malformed or the param is absent.
+ */
+function codeFromQrUrl(url: string): string | null {
+  try {
+    return new URL(url).searchParams.get('code');
+  } catch {
+    return null;
+  }
 }
 
 /** Render markdown-lite: bold (**text**) and line breaks */
@@ -38,6 +53,8 @@ export default function AgentPanel({
   activeHitl,
   onSend,
   onSubmitHitlOtp,
+  onSubmitHitlQr,
+  onCancelHitl,
   onClear,
   onClose,
 }: Props) {
@@ -185,7 +202,49 @@ export default function AgentPanel({
             </p>
             <p className="text-sm text-text-primary mb-3">{activeHitl.message ?? 'Verification is required to continue.'}</p>
 
-            {(activeHitl.metadata?.event_type ?? 'otp-required') === 'otp-required' ? (
+            {(activeHitl.metadata?.event_type ?? 'otp-required') === 'qr-required' ? (
+              /* ---- QR-code challenge ---- */
+              <div className="flex flex-col items-center gap-3">
+                {activeHitl.metadata?.qr_code_url ? (
+                  <>
+                    <img
+                      src={activeHitl.metadata.qr_code_url as string}
+                      alt="Scan this QR code to continue"
+                      width={160}
+                      height={160}
+                      className="rounded-lg"
+                    />
+                    {/* Verification code extracted from ?code= param — matches what the mobile app shows */}
+                    {codeFromQrUrl(activeHitl.metadata.qr_code_url as string) && (
+                      <p className="text-xs text-text-muted text-center">
+                        Code:{' '}
+                        <span className="font-mono font-bold text-lg text-amber-300 tracking-widest">
+                          {codeFromQrUrl(activeHitl.metadata.qr_code_url as string)}
+                        </span>
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-xs text-text-muted">QR code not yet available.</p>
+                )}
+                <div className="flex items-center gap-2 w-full">
+                  <button
+                    onClick={onSubmitHitlQr}
+                    disabled={thinking}
+                    className="flex-1 px-3 py-2 rounded-lg bg-accent text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    I've scanned it
+                  </button>
+                  <button
+                    onClick={onCancelHitl}
+                    className="px-3 py-2 rounded-lg text-text-muted hover:text-text-secondary text-sm"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* ---- OTP challenge ---- */
               <div className="flex items-center gap-2">
                 <input
                   value={otpCode}
@@ -201,11 +260,15 @@ export default function AgentPanel({
                 >
                   Verify
                 </button>
+                <button
+                  onClick={onCancelHitl}
+                  title="Cancel verification"
+                  aria-label="Cancel verification"
+                  className="px-2 py-2 rounded-lg text-text-muted hover:text-text-secondary text-sm"
+                >
+                  ✕
+                </button>
               </div>
-            ) : (
-              <p className="text-xs text-text-muted">
-                This challenge type is not yet fully rendered. Continue in chat for now.
-              </p>
             )}
           </div>
         )}

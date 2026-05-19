@@ -283,6 +283,35 @@ export function useAgent(agentToken: string | null, userSub?: string) {
     setActiveHitl(null);
   }, []);
 
+  /** Resume a QR-code HITL — user has scanned the QR and clicked confirm. */
+  const submitHitlQr = useCallback(async () => {
+    if (!activeHitl) return;
+
+    const transactionId =
+      typeof activeHitl.metadata?.transaction_id === 'string'
+        ? activeHitl.metadata.transaction_id
+        : activeHitl.id;
+
+    const resume = [
+      {
+        interruptId: activeHitl.id,
+        status: 'resolved' as const,
+        payload: {
+          transaction_id: transactionId,
+          event_type: 'qr-required',
+        },
+      },
+    ];
+
+    setActiveHitl(null);
+    await sendMessageCore('Resuming interrupted flow.', 'QR code scanned — resuming.', resume);
+  }, [activeHitl, sendMessageCore]);
+
+  /** Cancel the active HITL interrupt (OTP or QR). */
+  const cancelHitl = useCallback(() => {
+    setActiveHitl(null);
+  }, []);
+
   return {
     messages,
     thinking,
@@ -291,5 +320,7 @@ export function useAgent(agentToken: string | null, userSub?: string) {
     sessionId,
     activeHitl,
     submitHitlOtp,
+    submitHitlQr,
+    cancelHitl,
   };
 }

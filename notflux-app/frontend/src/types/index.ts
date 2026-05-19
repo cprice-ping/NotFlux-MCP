@@ -51,6 +51,8 @@ export interface HitlChallenge {
   metadata?: {
     event_type?: string;
     transaction_id?: string;
+    /** Deep-link URL for QR-code HITL events — rendered as a QR code image in the UI. */
+    qr_code_url?: string;
     [key: string]: unknown;
   };
 }

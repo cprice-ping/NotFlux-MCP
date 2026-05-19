@@ -43,6 +43,8 @@ export default function HomePage({ user }: Props) {
     clearMessages,
     activeHitl,
     submitHitlOtp,
+    submitHitlQr,
+    cancelHitl,
   } = useAgent(
     accessToken,
     userSub
@@ -256,6 +258,8 @@ export default function HomePage({ user }: Props) {
           activeHitl={activeHitl}
           onSend={sendMessage}
           onSubmitHitlOtp={submitHitlOtp}
+          onSubmitHitlQr={submitHitlQr}
+          onCancelHitl={cancelHitl}
           onClear={clearMessages}
           onClose={() => setAgentOpen(false)}
         />

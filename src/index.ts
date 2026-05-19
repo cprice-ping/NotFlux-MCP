@@ -210,7 +210,7 @@ function hasExpectedAudience(token: string): boolean {
 
 /**
  * Accepts either:
- * - UUID (d6df...)
+ * - UUID (d6df...))
  * - managed reference (managed/primaryAccount/d6df...)
  * and returns managed/primaryAccount/<id>.
  */
@@ -350,12 +350,24 @@ async function executeWithHitl(
     `[tool_http] hitl_challenge method=${ctx.method} path=${ctx.path}` +
       ` event=${result.challenge.error} tx=${result.challenge.transactionId}`
   );
-  const challengePayload = {
+  // For qr-required, P1AZ puts the QR image URL directly in error_description.
+  // Promote it to qr_code_url and replace message with human-readable text.
+  // The verification code is embedded as ?code= in the URL — the frontend
+  // extracts and displays it from there.
+  const isQr = result.challenge.error === "qr-required";
+  const challengePayload: Record<string, unknown> = {
     hitl_required: true,
     event_type: result.challenge.error,
     transaction_id: result.challenge.transactionId,
-    message: result.challenge.errorDescription,
+    message: isQr
+      ? "Scan the QR code with your mobile device to verify your identity."
+      : result.challenge.errorDescription,
   };
+  if (isQr && result.challenge.errorDescription) {
+    // Strip any trailing ")" that may appear if the policy template wraps the
+    // URL in parentheses and hasn't been simplified to a bare URL yet.
+    challengePayload.qr_code_url = result.challenge.errorDescription.trim().replace(/\)+$/, "");
+  }
   return {
     content: [{ type: "text" as const, text: JSON.stringify(challengePayload, null, 2) }],
   };
@@ -495,6 +507,10 @@ function buildMcpServer(tokenRef: { current: string }): Server {
               description: "Optional raw get_account response object containing associatedPrimary.",
               additionalProperties: true,
             },
+            transaction_id: {
+              type: "string",
+              description: "HITL transaction id from a previous QR-code challenge response, used to retry after the QR has been scanned.",
+            },
           },
           required: ["name", "email"],
         },
@@ -606,12 +622,14 @@ function buildMcpServer(tokenRef: { current: string }): Server {
           associated_primary_id,
           associated_primary_ref,
           account,
+          transaction_id,
         } = args as {
           name: string;
           email: string;
           associated_primary_id?: string;
           associated_primary_ref?: string;
           account?: unknown;
+          transaction_id?: string;
         };
 
         const primaryRef =
@@ -639,7 +657,9 @@ function buildMcpServer(tokenRef: { current: string }): Server {
             email,
             associatedPrimary: { _ref: primaryRef },
           },
-        }, "manage_profiles");
+        }, "manage_profiles", {
+          transactionId: transaction_id,
+        });
 
         console.log(
           `[tool_call] finish name=${name} email=${email} primaryRef=${primaryRef} isError=${Boolean(result.isError)}`

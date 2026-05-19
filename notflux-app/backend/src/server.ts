@@ -43,6 +43,8 @@ interface HitlChallenge {
   event_type: string;
   transaction_id: string;
   message: string;
+  /** Deep-link URL for QR-code challenges. Frontend renders this as a QR image. */
+  qr_code_url?: string;
 }
 
 interface AgUiInterrupt {
@@ -111,13 +113,15 @@ function buildResumeInstruction(
     typeof payload.event_type === 'string'
       ? payload.event_type
       : 'otp-required';
+  const isQr = eventType === 'qr-required';
 
   return [
     'HITL verification complete. Retry the same tool call now.',
     `event_type: ${eventType}`,
     `transaction_id: ${transactionId}`,
-    `otp_code: ${otp}`,
-    'Use transaction_id and otp_code as tool arguments.',
+    ...(isQr
+      ? ['Use transaction_id as a tool argument.']
+      : [`otp_code: ${otp}`, 'Use transaction_id and otp_code as tool arguments.']),
   ].join('\n');
 }
 
@@ -154,6 +158,7 @@ function findHitlChallenge(value: unknown): HitlChallenge | null {
       event_type: value.event_type,
       transaction_id: value.transaction_id,
       message: value.message,
+      qr_code_url: typeof value.qr_code_url === 'string' ? value.qr_code_url : undefined,
     };
   }
 
@@ -424,6 +429,7 @@ app.post('/api/chat', async (req, res) => {
 
       emittedInterruptIds.add(interruptId);
       interrupted = true;
+      const isQr = challenge.event_type === 'qr-required';
       emitSse(res, {
         type: 'RUN_FINISHED',
         threadId,
@@ -435,18 +441,28 @@ app.post('/api/chat', async (req, res) => {
               id: interruptId,
               reason: 'input_required',
               message: challenge.message,
-              responseSchema: {
-                type: 'object',
-                properties: {
-                  transaction_id: { type: 'string' },
-                  otp_code: { type: 'string' },
-                  event_type: { type: 'string' },
-                },
-                required: ['transaction_id', 'otp_code'],
-              },
+              responseSchema: isQr
+                ? {
+                    type: 'object',
+                    properties: {
+                      transaction_id: { type: 'string' },
+                      event_type: { type: 'string' },
+                    },
+                    required: ['transaction_id'],
+                  }
+                : {
+                    type: 'object',
+                    properties: {
+                      transaction_id: { type: 'string' },
+                      otp_code: { type: 'string' },
+                      event_type: { type: 'string' },
+                    },
+                    required: ['transaction_id', 'otp_code'],
+                  },
               metadata: {
                 event_type: challenge.event_type,
                 transaction_id: challenge.transaction_id,
+                ...(challenge.qr_code_url ? { qr_code_url: challenge.qr_code_url } : {}),
               },
             },
           ],
