@@ -132,8 +132,6 @@ interface BearerChallenge {
   /** acr_values= — PingOne MFA transaction handle, passed back on retry */
   transactionId: string;
   maxAge?: number;
-  /** qr_url= — deep-link URL for QR-code HITL events (e.g. PingOne device binding) */
-  qrUrl?: string;
 }
 
 interface RequestContext {
@@ -172,7 +170,6 @@ function parseBearerChallenge(header: string): BearerChallenge | null {
     errorDescription: params["error_description"] ?? error,
     transactionId,
     maxAge: params["max_age"] !== undefined ? Number(params["max_age"]) : undefined,
-    qrUrl: params["qr_url"],
   };
 }
 
@@ -353,14 +350,20 @@ async function executeWithHitl(
     `[tool_http] hitl_challenge method=${ctx.method} path=${ctx.path}` +
       ` event=${result.challenge.error} tx=${result.challenge.transactionId}`
   );
+  // For qr-required, P1AZ puts the QR image URL in error_description
+  // (custom WWW-Authenticate params are stripped). Promote it to qr_code_url
+  // and replace message with a human-readable prompt.
+  const isQr = result.challenge.error === "qr-required";
   const challengePayload: Record<string, unknown> = {
     hitl_required: true,
     event_type: result.challenge.error,
     transaction_id: result.challenge.transactionId,
-    message: result.challenge.errorDescription,
+    message: isQr
+      ? "Scan the QR code with your mobile device to verify your identity."
+      : result.challenge.errorDescription,
   };
-  if (result.challenge.qrUrl) {
-    challengePayload.qr_code_url = result.challenge.qrUrl;
+  if (isQr && result.challenge.errorDescription) {
+    challengePayload.qr_code_url = result.challenge.errorDescription;
   }
   return {
     content: [{ type: "text" as const, text: JSON.stringify(challengePayload, null, 2) }],
