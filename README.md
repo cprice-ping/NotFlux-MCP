@@ -1,191 +1,147 @@
-# NotFlux — AI-Powered Streaming Demo
+# NotFlux
 
-A demo application showing how to integrate a **Google Vertex AI Agent Engine** chatbot into a streaming media app, with a full enterprise OAuth 2.0 token exchange chain enforced at every service boundary.
+NotFlux is a demo streaming application built around a Vertex-hosted ADK agent, an MCP server, and PingOne-issued tokens exchanged across service boundaries.
 
-## System overview
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  NotFlux App  (notflux-app/)                            │
-│                                                         │
-│  React + Vite frontend  ◄──────────────────────────┐   │
-│    • PingOne PKCE login                             │   │
-│    • Netflix-style media grid                       │   │
-│    • AI chat panel (streaming)                      │   │
-│         │                                           │   │
-│         │ agent_token                               │   │
-│         ▼                                           │   │
-│  Express backend proxy                              │   │
-│    • Token Exchange 1: agent_token → mcp_token      │   │
-│    • Vertex AI Agent Engine sessions + SSE stream ──┘   │
-└──────────────────────────┬──────────────────────────────┘
-                           │ mcp_token (via Vertex session state)
-                           ▼
-┌─────────────────────────────────────────────────────────┐
-│  NotFlux MCP Server  (src/)                             │
-│                                                         │
-│  MCP 2025-11-25 spec, Streamable HTTP, port 8080        │
-│    • JWT validation (RFC 9470 / RFC 6750)               │
-│    • Token Exchange 2: mcp_token → api_token            │
-│    • 4 tools: get_all_media_metadata, get_media_        │
-│      metadata, get_media_content, get_account           │
-└──────────────────────────┬──────────────────────────────┘
-                           │ api_token (ephemeral)
-                           ▼
-┌─────────────────────────────────────────────────────────┐
-│  Kong Gateway + PingOne AAM                             │
-│    • ping-auth plugin validates api_token               │
-│    • AAM policy enforces per-user content ratings       │
-└─────────────────────────────────────────────────────────┘
-```
-
-The user logs into the NotFlux App with PingOne. A second, silently-acquired token is scoped to the Vertex AI agent. The Vertex agent calls the MCP Server via the MCP protocol, passing a token that is only useful against the MCP Server — not Kong. The MCP Server performs its own token exchange to get a short-lived Kong-usable token before making each API call. No single component ever holds a token that is valid against all services.
+The key architectural rule is that **PingOne Authorize / AAM is the policy brain**. It decides entitlement, restriction, and step-up outcomes. The agent, app backend, and MCP server do not make their own authorization decisions; they pass tokens, execute requests, and relay policy outcomes.
 
 ## Components
 
-| Directory | Description |
-|-----------|-------------|
-| `src/` | MCP Server — TypeScript, Node.js 22, `@modelcontextprotocol/sdk` |
-| `notflux-app/frontend/` | React + Vite + Tailwind SPA |
-| `notflux-app/backend/` | Express proxy — Vertex AI bridge + token exchanges |
-| `k8s/` | Kubernetes manifests (ARM64, namespace `ping-devops-cprice`) |
+| Path | Purpose |
+|------|---------|
+| `src/` | MCP server that exposes NotFlux API operations as MCP tools |
+| `notflux-app/frontend/` | React/Vite frontend for login, chat UI, and HITL rendering |
+| `notflux-app/backend/` | Express bridge for Vertex sessions, stream translation, and Exchange 1 |
+| `notflux-agent/` | Vertex ADK agent that injects MCP auth from session state |
+| `k8s/` | Kubernetes manifests for MCP deployment |
 
-## MCP Server transport
+## MCP Server
 
-**Streamable HTTP** – the server exposes a single `/mcp` endpoint:
+The MCP server is compliant with the **2025-11-25 specification** and exposes NotFlux API operations as tools for the agent.
+
+It is intentionally thin. It validates the incoming MCP token audience, performs a tool-scoped token exchange for the NotFlux API, forwards the request, and relays the policy outcome back to the agent.
+
+## Transport
+
+**Streamable HTTP** on `/mcp`:
 
 | Method | Purpose |
 |--------|---------|
-| `POST /mcp` | JSON-RPC requests (initialize + all tool calls) |
+| `POST /mcp` | JSON-RPC requests (initialize + tool calls) |
 | `GET /mcp` | SSE stream for server-to-client notifications |
 | `DELETE /mcp` | Explicit session termination |
 
-## MCP tools
+## Tools
 
-| Tool | Description |
-|------|-------------|
-| `get_all_media_metadata` | List all media items available to the user |
-| `get_media_metadata` | Fetch metadata (incl. DRM token) for a single item |
-| `get_media_content` | Retrieve playable content using the DRM token |
-| `get_account` | Look up an account by UUID |
+| Tool | Scope used in MCP -> Kong exchange | Purpose |
+|------|------------------------------------|---------|
+| `get_all_media_metadata` | `get_media` | List media available to the current user |
+| `get_media_metadata` | `get_media` | Fetch metadata for a single title |
+| `get_media_content` | `get_media` | Retrieve playable content using a DRM token |
+| `get_account` | `manage_account` | Return account details for the current user or a specific account |
+| `create_profile` | `manage_profiles` | Create a profile under a primary account |
+| `delete_profile` | `manage_profiles` | Delete a profile by UUID |
+| `get_primary_account` | `manage_profiles` | Fetch a primary account by UUID |
 
-## Running locally
+`get_media_content` is the only tool that accepts `transaction_id` and `otp_code` for HITL retry. Other tools surface policy outcomes but do not expose retry arguments in the tool schema.
 
-```bash
-# 1. Install all dependencies (root MCP Server + notflux-app)
-npm install
-cd notflux-app && npm install && cd ..
+## Architecture
 
-# 2. Configure environment files
-cp .env.example .env                                          # MCP Server
-cp notflux-app/.env.example notflux-app/backend/.env         # App backend
-cp notflux-app/frontend/.env.example notflux-app/frontend/.env  # App frontend
-
-# 3. Fill in PingOne client IDs/secrets/audiences in each .env file
-
-# 4. Start the app (frontend on :5173, backend on :3001)
-cd notflux-app && npm run dev
-
-# 5. Start the MCP Server separately (port 8080)
-npm run dev
+```text
+PingOne person/agent token
+  -> Exchange 1 in app backend: agent_token/person_token -> mcp_token
+  -> Agent sends Bearer mcp_token to MCP Server
+  -> MCP Server validates aud=EXPECTED_AUDIENCE
+  -> Exchange 2 in MCP Server: mcp_token -> kong_token(scope is chosen per tool)
+  -> NotFlux API behind Kong + PingOne Authorize / AAM
 ```
+
+Important boundary:
+
+- **PingOne Authorize / AAM** decides access, restrictions, and step-up requirements.
+- **MCP Server** executes the requested tool call and returns the policy result.
+- **Agent** explains results to the user and retries only when the policy engine requires additional input.
+
+## HITL / Step-Up Behavior
+
+When the NotFlux API responds with a `401` Bearer challenge containing PingOne step-up metadata, the MCP server converts that into a structured HITL payload:
+
+```json
+{
+  "hitl_required": true,
+  "event_type": "otp-required",
+  "transaction_id": "...",
+  "message": "This request needs an OTP ..."
+}
+```
+
+The agent/client must treat that as a policy challenge, not as an application error. On retry, only `get_media_content` currently carries `transaction_id` and `otp_code` back into the tool call.
+
+## Prerequisites
+
+- Node.js >= 20
+- A PingOne environment configured for both exchanges
+- A client that can send an `Authorization: Bearer <mcp_token>` header to `/mcp`
 
 ## Environment Variables
 
-### MCP Server (`.env`)
+See [.env.example](.env.example).
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `PINGONE_ENV_ID` | Yes | — | PingOne environment UUID |
-| `MCP_AUDIENCE` | Yes* | — | `aud` claim to validate on inbound tokens (`notflux-mcp`). Set to enable JWT validation |
-| `MCP_REQUIRED_SCOPE` | No | `use_mcp_tools` | Scope required on inbound MCP tokens |
-| `MCP_RS_CLIENT_ID` | Yes* | — | `notflux-mcp-rs` Worker app client ID. Set to enable Exchange 2 |
-| `MCP_RS_CLIENT_SECRET` | Yes* | — | `notflux-mcp-rs` Worker app client secret |
-| `MCP_API_AUDIENCE` | Yes* | — | Audience of the NotFlux API resource (what Kong validates) |
-| `MCP_API_SCOPE` | No | `get_media` | Scope to request on the outbound API token |
-| `MCP_PUBLIC_BASE_URL` | No | — | Public URL, used in WWW-Authenticate headers and RFC 9470 discovery |
-| `PORT` | No | `8080` | HTTP listen port |
+Key variables:
 
-### App backend (`notflux-app/backend/.env`)
+| Variable | Description |
+|----------|-------------|
+| `EXPECTED_AUDIENCE` | Audience the MCP server requires on the incoming MCP token |
+| `PINGONE_ENV_ID` | PingOne environment for Exchange 2 |
+| `PINGONE_TX_CLIENT_ID` | Confidential client used for Exchange 2 |
+| `PINGONE_TX_CLIENT_SECRET` | Client secret for Exchange 2 |
+| `PINGONE_KONG_AUDIENCE` | Audience of the Kong / NotFlux API token |
+| `PORT` | HTTP listen port, default `8080` |
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `PINGONE_ENV_ID` | Yes | — | PingOne environment UUID |
-| `PINGONE_TX_CLIENT_ID` | Yes* | — | `notflux-backend` Worker app client ID |
-| `PINGONE_TX_CLIENT_SECRET` | Yes* | — | `notflux-backend` Worker app client secret |
-| `PINGONE_MCP_AUDIENCE` | Yes* | — | Audience of the MCP Server resource (`notflux-mcp`) |
-| `PINGONE_MCP_SCOPE` | No | `use_mcp_tools` | Scope to request in Exchange 1 |
-| `PINGONE_AGENT_AUDIENCE` | No | — | Expected `aud` on incoming agent tokens (enables validation) |
-| `VERTEX_AGENT_RESOURCE` | Yes | — | Vertex AI Agent Engine resource name |
-| `BACKEND_PORT` | No | `3001` | HTTP listen port |
+Exchange 2 scope is **not** configured globally in `.env`. It is selected per tool call in code so the resulting Kong token matches the API operation being performed.
 
-### App frontend (`notflux-app/frontend/.env`)
+## Running The MCP Server
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `VITE_PINGONE_ENV_ID` | Yes | PingOne environment UUID |
-| `VITE_PINGONE_CLIENT_ID` | Yes | SPA application client ID |
-| `VITE_PINGONE_AGENT_RESOURCE` | No | Audience URI for the agent resource (enables separate agent token) |
-
-## OAuth 2.0 Token Chain (RFC 8693 Token Exchange)
-
-The full request path involves three tokens, each scoped to exactly one service boundary. No token is usable beyond the hop it was issued for.
-
-```
-Browser (PKCE login)
-  │
-  ├─ person_token  aud=notflux-api  scope=get_media
-  │   └─► NotFlux App frontend → direct Kong calls (/media, /accounts)
-  │
-  └─ agent_token   aud=google-agent  scope=agent-use
-      └─► NotFlux App backend
-            │
-            Exchange 1 (notflux-backend Worker app)
-            │   subject_token: agent_token
-            │   → mcp_token   aud=notflux-mcp  scope=use_mcp_tools
-            │
-            └─► Vertex AI Agent Engine session state
-                  └─► MCP Server
-                        │
-                        Exchange 2 (notflux-mcp-rs Worker app)
-                        │   subject_token: mcp_token
-                        │   → api_token   aud=notflux-api  scope=get_media
-                        │
-                        └─► Kong Gateway (ping-auth + AAM)
+```bash
+npm install
+npm run dev
 ```
 
-### Token hop summary
+For a production build:
 
-| Hop | Token name | `aud` | `scope` | Validated by | Env var(s) |
-|-----|-----------|-------|---------|--------------|------------|
-| 0 — PKCE login | `person_token` | `notflux-api` | `get_media` | Kong ping-auth | `VITE_PINGONE_*` (frontend) |
-| 0 — silent PKCE | `agent_token` | `google-agent` | `agent-use` | Backend (`checkAgentToken`) | `PINGONE_AGENT_AUDIENCE` |
-| 1 — Exchange | `mcp_token` | `notflux-mcp` | `use_mcp_tools` | MCP Server (`validateBearerToken`) | `MCP_AUDIENCE`, `MCP_REQUIRED_SCOPE` |
-| 2 — Exchange | `api_token` | `notflux-api` | `get_media` | Kong ping-auth + AAM | `MCP_API_AUDIENCE`, `MCP_API_SCOPE` |
+```bash
+npm run build
+npm start
+```
 
-The `api_token` is ephemeral — created inside `notfluxRequest()` and never stored in session state. A compromised agent session or MCP transport yields only a `mcp_token`, which Kong will reject (wrong audience). An attacker also needs `MCP_RS_CLIENT_ID` + `MCP_RS_CLIENT_SECRET` to perform Exchange 2.
+The server listens on `http://localhost:8080/mcp` by default.
 
-### PingOne application setup
+For the full end-to-end app flow, see [notflux-app/README.md](notflux-app/README.md).
 
-| PingOne app | Type | Grant | Actor policy | Issues |
-|-------------|------|-------|--------------|--------|
-| NotFlux SPA | Native/SPA | Authorization Code + PKCE | — | `person_token`, `agent_token` |
-| `notflux-backend` | Worker | Token Exchange | subject=`google-agent` audience tokens | `mcp_token` |
-| `notflux-mcp-rs` | Worker | Token Exchange | subject=`notflux-mcp` audience tokens | `api_token` |
+## Connecting an MCP Client
 
-### PingOne resource setup
+### VS Code
 
-| Resource name | Audience | Scopes |
-|---------------|----------|--------|
-| NotFlux MCP Server | `notflux-mcp` | `use_mcp_tools` |
-| NotFlux API | `notflux-api` _(or Kong's configured value)_ | `get_media` |
+```json
+{
+  "servers": {
+    "notflux": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp"
+    }
+  }
+}
+```
 
----
+### Claude Desktop
 
-## Workflow Example
+```json
+{
+  "mcpServers": {
+    "notflux": {
+      "url": "http://localhost:8080/mcp"
+    }
+  }
+}
+```
 
-A typical agent interaction looks like:
-
-1. Call `get_all_media_metadata` to see the available catalogue.
-2. Call `get_media_metadata` with a specific `id` to get the DRM token.
-3. Call `get_media_content` with both `id` and `drm` to retrieve the content.
+The MCP client must provide an `Authorization` header carrying an MCP-audience token. In the full NotFlux flow, that token is injected dynamically by the Vertex agent runtime rather than hard-coded in client config.

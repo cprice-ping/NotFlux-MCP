@@ -34,6 +34,12 @@ TOKEN FLOW:
                                                       ▼
                                         Kong Gateway + PingOne AAM
 
+POLICY AUTHORITY:
+    PingOne Authorize / AAM is the decision point for entitlement, restriction,
+    and step-up outcomes. The agent does not make its own access-control
+    decisions. It selects tools, relays policy outcomes, and preserves structured
+    HITL challenges so the client can render them and retry when required.
+
 DEPLOYMENT PATTERN:
   Follows the canonical Google ADK pattern — AdkApp is passed directly to
   ReasoningEngine.create(), NOT wrapped in a custom class.  This ensures

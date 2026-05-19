@@ -1,62 +1,94 @@
 # NotFlux App
 
-Netflix-pun streaming demo with PingOne OIDC login and an embedded Vertex AI Agent.
+React frontend + Express backend for the NotFlux demo, with PingOne login and a Vertex-hosted ADK agent.
+
+The app is the user-facing shell. It does **not** decide entitlements, restrictions, or step-up requirements. Those decisions come from **PingOne Authorize / AAM** at the API layer. The app gathers user input, establishes agent sessions, and renders the outcomes returned by the agent and MCP server.
 
 ## Architecture
 
-```
+```text
 Browser (React SPA)
-  │  PKCE Auth Code flow
-  ▼
-PingOne  ─── issues access_token (scope: get_media)
-  │
-  │  Bearer token in Authorization header
-  ▼
-Vite dev proxy /api → localhost:3001 (backend)
-  │
-  ├── POST /api/sessions ──► Vertex AI Agent Engine (creates session, injects PingOne token in state)
-  ├── POST /api/chat     ──► Vertex AI Agent Engine (stream SSE)   ← GCP ADC auth
-  └── /api/notflux/*    ──► notflux-api.ping-devops.com (Kong / ping-auth AAM)
+  -> PingOne login
+  -> frontend calls backend with Bearer token
+
+Backend (/api/sessions)
+  -> Exchange 1: agent/person token -> mcp_token
+  -> creates Vertex session
+  -> stores pingone_authorization="Bearer <mcp_token>" in session state
+
+Backend (/api/chat)
+  -> streams Vertex agent output back to browser as SSE
+
+Vertex ADK agent
+  -> reads pingone_authorization from session state
+  -> injects Authorization header into MCP tool connection
+
+MCP Server
+  -> validates MCP token audience
+  -> Exchange 2: mcp_token -> kong_token(scope chosen per tool)
+  -> calls NotFlux API
+
+NotFlux API behind Kong + PingOne Authorize / AAM
+  -> returns allow / deny / step-up challenge
 ```
 
-The agent tool-calls flow back through the existing **NotFlux MCP Server** running in k8s.  
-The agent reads `pingone_authorization` from session state and uses it as the Bearer token for MCP calls.
+## Decision Boundary
+
+- **PingOne Authorize / AAM** is the policy brain. It decides what the caller can access and whether step-up is required.
+- **NotFlux API** enforces that policy result.
+- **MCP Server** forwards requests and relays the result.
+- **Agent** does not invent authorization decisions. It explains results, asks the user for additional input when the policy engine requires it, and retries the relevant tool call.
+- **Frontend/backend app** renders the conversation and HITL state; it does not make access-control decisions.
+
+## Token Exchanges
+
+### Exchange 1: app backend -> MCP token
+
+The backend performs RFC 8693 token exchange before creating the Vertex session:
+
+- input: frontend token presented to `/api/sessions`
+- output: MCP-audience token
+- storage: session state key `pingone_authorization`
+
+This is what lets the Vertex agent connect to the MCP server with a per-user Bearer token.
+
+### Exchange 2: MCP server -> Kong token
+
+The MCP server performs a second RFC 8693 token exchange on each tool call:
+
+- input: MCP-audience token from the agent
+- output: Kong / NotFlux API token
+- scope: selected **per tool** in the MCP server code, for example `get_media`, `manage_account`, or `manage_profiles`
+
+This is what binds each API call to the scope required by the underlying NotFlux endpoint.
+
+## HITL / Step-Up
+
+When PingOne policy requires step-up, the API returns a Bearer challenge. The MCP server converts that challenge into structured HITL JSON, and the backend/frontend render it as interrupt UI.
+
+The important detail is that the step-up requirement is a **policy decision**, not an agent decision. The agent is expected to preserve and relay the structured challenge rather than reinterpret it.
 
 ## Prerequisites
 
 - Node.js 22+
-- `gcloud auth application-default login` (for backend GCP auth)
-- PingOne OIDC client `5d24d1a9-851e-4cfb-8f94-d23d4b8b5be2` configured with:
-  - Grant type: **Authorization Code (PKCE)**
-  - Redirect URI: `http://localhost:5173/callback`
-  - Post-logout redirect URI: `http://localhost:5173/`
-  - Allowed scopes: `openid profile get_media`
-  - Token endpoint auth method: **None** (public client / PKCE)
+- `gcloud auth application-default login`
+- PingOne OIDC client `5d24d1a9-851e-4cfb-8f94-d23d4b8b5be2` configured for PKCE login
 
-## Quick start
+## Quick Start
 
 ```bash
 cd notflux-app
-
-# Copy and review env
 cp .env.example backend/.env
-
-# Install all workspaces
 npm install
-
-# Start both backend (port 3001) and frontend (port 5173) in parallel
 npm run dev
 ```
 
-Open http://localhost:5173 → sign in via PingOne → browse content → click ✦ to chat with the agent.
+Open `http://localhost:5173`, sign in via PingOne, and use the assistant or direct UI flows.
 
-## PingOne OIDC client setup note
+## Notes
 
-The ADK agent must read the `pingone_authorization` session state key in MCP tool calls:
+- The backend streams agent output as SSE and translates HITL events for the frontend.
+- The frontend renders OTP / HITL UI from structured interrupt data.
+- The agent injects MCP auth dynamically from Vertex session state rather than from static config.
 
-```python
-# In your ADK agent tool or MCPToolset connection headers:
-headers={"Authorization": lambda ctx: ctx.state.get("pingone_authorization", "")}
-```
-
-See the MCP Server README for more details on the token flow.
+See [../README.md](../README.md) for MCP-server-specific details.
