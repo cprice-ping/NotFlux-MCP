@@ -213,7 +213,7 @@ function hasExpectedAudience(token: string): boolean {
 
 /**
  * Accepts either:
- * - UUID (d6df...)
+ * - UUID (d6df...))
  * - managed reference (managed/primaryAccount/d6df...)
  * and returns managed/primaryAccount/<id>.
  */

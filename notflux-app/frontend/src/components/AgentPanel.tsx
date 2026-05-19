@@ -1,5 +1,4 @@
 import { useRef, useEffect, useState, type KeyboardEvent } from 'react';
-import QRCode from 'react-qr-code';
 import type { ChatMessage, HitlChallenge } from '../types';
 import { useFocusTrap } from '../hooks/useKeyboard';
 
@@ -13,6 +12,19 @@ interface Props {
   onCancelHitl: () => void;
   onClear: () => void;
   onClose: () => void;
+}
+
+/**
+ * Extracts the `code=` query parameter from a P1AZ QR image URL.
+ * e.g. https://api.pingone.com/v1/idValidations/webVerifications/<id>/qr?code=367658
+ * Returns null if the URL is malformed or the param is absent.
+ */
+function codeFromQrUrl(url: string): string | null {
+  try {
+    return new URL(url).searchParams.get('code');
+  } catch {
+    return null;
+  }
 }
 
 /** Render markdown-lite: bold (**text**) and line breaks */
@@ -194,15 +206,26 @@ export default function AgentPanel({
               /* ---- QR-code challenge ---- */
               <div className="flex flex-col items-center gap-3">
                 {activeHitl.metadata?.qr_code_url ? (
-                  <div className="bg-white p-3 rounded-xl inline-block">
-                    <QRCode
-                      value={activeHitl.metadata.qr_code_url as string}
-                      size={160}
-                      aria-label="Scan this QR code to continue"
+                  <>
+                    <img
+                      src={activeHitl.metadata.qr_code_url as string}
+                      alt="Scan this QR code to continue"
+                      width={160}
+                      height={160}
+                      className="rounded-lg"
                     />
-                  </div>
+                    {/* Verification code extracted from ?code= param — matches what the mobile app shows */}
+                    {codeFromQrUrl(activeHitl.metadata.qr_code_url as string) && (
+                      <p className="text-xs text-text-muted text-center">
+                        Code:{' '}
+                        <span className="font-mono font-bold text-lg text-amber-300 tracking-widest">
+                          {codeFromQrUrl(activeHitl.metadata.qr_code_url as string)}
+                        </span>
+                      </p>
+                    )}
+                  </>
                 ) : (
-                  <p className="text-xs text-text-muted">QR code URL not yet available.</p>
+                  <p className="text-xs text-text-muted">QR code not yet available.</p>
                 )}
                 <div className="flex items-center gap-2 text-xs text-amber-300">
                   {qrPolling && (
