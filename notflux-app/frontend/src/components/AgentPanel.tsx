@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState, type KeyboardEvent } from 'react';
+import QRCode from 'react-qr-code';
 import type { ChatMessage, HitlChallenge } from '../types';
 import { useFocusTrap } from '../hooks/useKeyboard';
 
@@ -6,8 +7,10 @@ interface Props {
   messages: ChatMessage[];
   thinking: boolean;
   activeHitl: HitlChallenge | null;
+  qrPolling: boolean;
   onSend: (text: string) => void;
   onSubmitHitlOtp: (otpCode: string) => void;
+  onCancelHitl: () => void;
   onClear: () => void;
   onClose: () => void;
 }
@@ -36,8 +39,10 @@ export default function AgentPanel({
   messages,
   thinking,
   activeHitl,
+  qrPolling,
   onSend,
   onSubmitHitlOtp,
+  onCancelHitl,
   onClear,
   onClose,
 }: Props) {
@@ -185,7 +190,38 @@ export default function AgentPanel({
             </p>
             <p className="text-sm text-text-primary mb-3">{activeHitl.message ?? 'Verification is required to continue.'}</p>
 
-            {(activeHitl.metadata?.event_type ?? 'otp-required') === 'otp-required' ? (
+            {(activeHitl.metadata?.event_type ?? 'otp-required') === 'qr-required' ? (
+              /* ---- QR-code challenge ---- */
+              <div className="flex flex-col items-center gap-3">
+                {activeHitl.metadata?.qr_code_url ? (
+                  <div className="bg-white p-3 rounded-xl inline-block">
+                    <QRCode
+                      value={activeHitl.metadata.qr_code_url as string}
+                      size={160}
+                      aria-label="Scan this QR code to continue"
+                    />
+                  </div>
+                ) : (
+                  <p className="text-xs text-text-muted">QR code URL not yet available.</p>
+                )}
+                <div className="flex items-center gap-2 text-xs text-amber-300">
+                  {qrPolling && (
+                    <>
+                      <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" aria-hidden="true" />
+                      <span>Waiting for scan…</span>
+                    </>
+                  )}
+                  {!qrPolling && <span>Scan with your mobile device to continue.</span>}
+                </div>
+                <button
+                  onClick={onCancelHitl}
+                  className="text-xs text-text-muted hover:text-text-secondary underline"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              /* ---- OTP challenge ---- */
               <div className="flex items-center gap-2">
                 <input
                   value={otpCode}
@@ -201,11 +237,15 @@ export default function AgentPanel({
                 >
                   Verify
                 </button>
+                <button
+                  onClick={onCancelHitl}
+                  title="Cancel verification"
+                  aria-label="Cancel verification"
+                  className="px-2 py-2 rounded-lg text-text-muted hover:text-text-secondary text-sm"
+                >
+                  ✕
+                </button>
               </div>
-            ) : (
-              <p className="text-xs text-text-muted">
-                This challenge type is not yet fully rendered. Continue in chat for now.
-              </p>
             )}
           </div>
         )}

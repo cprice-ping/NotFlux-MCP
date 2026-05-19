@@ -132,6 +132,8 @@ interface BearerChallenge {
   /** acr_values= — PingOne MFA transaction handle, passed back on retry */
   transactionId: string;
   maxAge?: number;
+  /** qr_url= — deep-link URL for QR-code HITL events (e.g. PingOne device binding) */
+  qrUrl?: string;
 }
 
 interface RequestContext {
@@ -170,6 +172,7 @@ function parseBearerChallenge(header: string): BearerChallenge | null {
     errorDescription: params["error_description"] ?? error,
     transactionId,
     maxAge: params["max_age"] !== undefined ? Number(params["max_age"]) : undefined,
+    qrUrl: params["qr_url"],
   };
 }
 
@@ -350,12 +353,15 @@ async function executeWithHitl(
     `[tool_http] hitl_challenge method=${ctx.method} path=${ctx.path}` +
       ` event=${result.challenge.error} tx=${result.challenge.transactionId}`
   );
-  const challengePayload = {
+  const challengePayload: Record<string, unknown> = {
     hitl_required: true,
     event_type: result.challenge.error,
     transaction_id: result.challenge.transactionId,
     message: result.challenge.errorDescription,
   };
+  if (result.challenge.qrUrl) {
+    challengePayload.qr_code_url = result.challenge.qrUrl;
+  }
   return {
     content: [{ type: "text" as const, text: JSON.stringify(challengePayload, null, 2) }],
   };
@@ -495,6 +501,10 @@ function buildMcpServer(tokenRef: { current: string }): Server {
               description: "Optional raw get_account response object containing associatedPrimary.",
               additionalProperties: true,
             },
+            transaction_id: {
+              type: "string",
+              description: "HITL transaction id from a previous QR-code challenge response, used to retry after the QR has been scanned.",
+            },
           },
           required: ["name", "email"],
         },
@@ -606,12 +616,14 @@ function buildMcpServer(tokenRef: { current: string }): Server {
           associated_primary_id,
           associated_primary_ref,
           account,
+          transaction_id,
         } = args as {
           name: string;
           email: string;
           associated_primary_id?: string;
           associated_primary_ref?: string;
           account?: unknown;
+          transaction_id?: string;
         };
 
         const primaryRef =
@@ -639,7 +651,9 @@ function buildMcpServer(tokenRef: { current: string }): Server {
             email,
             associatedPrimary: { _ref: primaryRef },
           },
-        }, "manage_profiles");
+        }, "manage_profiles", {
+          transactionId: transaction_id,
+        });
 
         console.log(
           `[tool_call] finish name=${name} email=${email} primaryRef=${primaryRef} isError=${Boolean(result.isError)}`

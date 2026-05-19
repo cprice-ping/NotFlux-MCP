@@ -42,7 +42,9 @@ export default function HomePage({ user }: Props) {
     sendMessage,
     clearMessages,
     activeHitl,
+    qrPolling,
     submitHitlOtp,
+    cancelHitl,
   } = useAgent(
     accessToken,
     userSub
@@ -254,8 +256,10 @@ export default function HomePage({ user }: Props) {
           messages={messages}
           thinking={thinking}
           activeHitl={activeHitl}
+          qrPolling={qrPolling}
           onSend={sendMessage}
           onSubmitHitlOtp={submitHitlOtp}
+          onCancelHitl={cancelHitl}
           onClear={clearMessages}
           onClose={() => setAgentOpen(false)}
         />
