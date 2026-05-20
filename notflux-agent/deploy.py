@@ -52,12 +52,16 @@ REQUIREMENTS = [
 # See .env.example for the required keys.
 # ---------------------------------------------------------------------------
 AGENT_ENV_VARS = {
-    'PINGONE_ENV_ID':             os.getenv('PINGONE_ENV_ID', ''),
-    'PINGONE_CLIENT_ID':          os.getenv('PINGONE_CLIENT_ID', ''),
-    'PINGONE_CLIENT_SECRET':      os.getenv('PINGONE_CLIENT_SECRET', ''),
-    'PINGONE_AGENT_AUDIENCE':     os.getenv('PINGONE_AGENT_AUDIENCE', ''),
-    'PINGONE_MCP_AUDIENCE':       os.getenv('PINGONE_MCP_AUDIENCE', ''),
-    'VERTEX_REASONING_ENGINE_ID': os.getenv('VERTEX_REASONING_ENGINE_ID', ''),
+    'PINGONE_ENV_ID':         os.getenv('PINGONE_ENV_ID', ''),
+    'PINGONE_CLIENT_ID':      os.getenv('PINGONE_CLIENT_ID', ''),
+    'PINGONE_CLIENT_SECRET':  os.getenv('PINGONE_CLIENT_SECRET', ''),
+    'PINGONE_AGENT_AUDIENCE': os.getenv('PINGONE_AGENT_AUDIENCE', ''),
+    'PINGONE_MCP_AUDIENCE':   os.getenv('PINGONE_MCP_AUDIENCE', ''),
+    # VERTEX_REASONING_ENGINE_ID is NOT injected here — Vertex does not expose
+    # the engine's own resource ID to its runtime automatically, and passing it
+    # at create-time creates a chicken-and-egg problem.  _get_vertex_agent_id()
+    # in agent.py constructs a partial identifier from GOOGLE_CLOUD_PROJECT and
+    # GOOGLE_CLOUD_LOCATION, which GCP does set in the managed runtime.
 }
 
 

@@ -85,14 +85,18 @@ _mcp_token_cache: dict[str, tuple[str, float]] = {}
 def _get_vertex_agent_id() -> str:
     """Return the Vertex Agent Engine resource path for use as a custom claim.
 
-    Reads standard GCP runtime env vars; returns an empty string when they are
-    not available so the exchange still proceeds without the claim.
+    Vertex ADK sets GCP_PROJECT, GCP_LOCATION, and VERTEX_REASONING_ENGINE_ID
+    in the engine runtime context — these are not user-supplied env vars.
+    Falls back to GOOGLE_CLOUD_* variants for local dev / other GCP runtimes.
+    Returns an empty string when unavailable so Exchange 2 proceeds without the claim.
     """
-    project  = os.getenv('GOOGLE_CLOUD_PROJECT') or os.getenv('CLOUD_ML_PROJECT_ID', '')
-    location = os.getenv('VERTEX_LOCATION', os.getenv('CLOUD_ML_REGION', 'us-west1'))
-    engine   = os.getenv('VERTEX_REASONING_ENGINE_ID', '')
-    if project and engine:
-        return f'projects/{project}/locations/{location}/reasoningEngines/{engine}'
+    project   = os.getenv('GCP_PROJECT') or os.getenv('GOOGLE_CLOUD_PROJECT') or os.getenv('CLOUD_ML_PROJECT_ID', '')
+    location  = os.getenv('GCP_LOCATION') or os.getenv('GOOGLE_CLOUD_LOCATION') or os.getenv('CLOUD_ML_REGION', 'us-west1')
+    engine_id = os.getenv('VERTEX_REASONING_ENGINE_ID', '')
+    if project and engine_id:
+        return f'projects/{project}/locations/{location}/reasoningEngines/{engine_id}'
+    if project:
+        return f'projects/{project}/locations/{location}/reasoningEngines/notflux'
     return ''
 
 
@@ -141,10 +145,13 @@ def _exchange_for_mcp_token(agent_token: str) -> str:
     ).decode()
 
     payload: dict[str, str] = {
-        'grant_type':        'urn:ietf:params:oauth:grant-type:token-exchange',
-        'subject_token':     agent_token,
-        'subject_token_type':'urn:ietf:params:oauth:token-type:access_token',
-        'audience':          _PINGONE_MCP_AUDIENCE,
+        'grant_type':         'urn:ietf:params:oauth:grant-type:token-exchange',
+        'subject_token':      agent_token,
+        # access_token is semantically correct for a PingOne-issued OAuth token.
+        # If the P1 Token Exchange policy is configured to expect a JWT assertion
+        # instead, change this to: urn:ietf:params:oauth:token-type:jwt
+        'subject_token_type': 'urn:ietf:params:oauth:token-type:access_token',
+        'audience':           _PINGONE_MCP_AUDIENCE,
     }
     if agent_id:
         payload['agent_id'] = agent_id
