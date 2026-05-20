@@ -21,6 +21,14 @@ import os
 import vertexai
 from vertexai.agent_engines import AgentEngine, AdkApp
 
+# Load .env file if present (install python-dotenv in your venv to use this).
+# Values can also be exported in the shell before running this script.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Change to the script's directory so extra_packages relative paths resolve correctly.
 # This ensures 'agent.py' is bundled as 'agent.py' (not a deep absolute path)
 # in the tar uploaded to the staging bucket.
@@ -40,22 +48,16 @@ REQUIREMENTS = [
 
 # ---------------------------------------------------------------------------
 # PingOne Token Exchange env vars injected into the Agent Engine runtime.
-# Fill in the blanks once PingOne clients are configured.
-#
-# In production, move PINGONE_CLIENT_SECRET to GCP Secret Manager and
-# reference it as {"PINGONE_CLIENT_SECRET": "secret:<version>"} in
-# secret_env_vars instead.
-#
-# VERTEX_REASONING_ENGINE_ID: fill in after the first --create run
-# (it's the numeric ID printed at the end of the create output).
+# Values are read from the environment (or notflux-agent/.env — gitignored).
+# See .env.example for the required keys.
 # ---------------------------------------------------------------------------
 AGENT_ENV_VARS = {
-    'PINGONE_ENV_ID':             '59bb6a66-e76e-490c-b83a-884c50423da4',
-    'PINGONE_CLIENT_ID':          '',  # Exchange 2 client id  — set after P1 wiring
-    'PINGONE_CLIENT_SECRET':      '',  # Exchange 2 client secret — set after P1 wiring
-    'PINGONE_AGENT_AUDIENCE':     '',  # aud expected on incoming agent_token (= PINGONE_AGENT_AUDIENCE in backend)
-    'PINGONE_MCP_AUDIENCE':       '',  # aud to request for mcp_token  (= MCP resource server)
-    'VERTEX_REASONING_ENGINE_ID': '',  # set after first --create run
+    'PINGONE_ENV_ID':             os.getenv('PINGONE_ENV_ID', ''),
+    'PINGONE_CLIENT_ID':          os.getenv('PINGONE_CLIENT_ID', ''),
+    'PINGONE_CLIENT_SECRET':      os.getenv('PINGONE_CLIENT_SECRET', ''),
+    'PINGONE_AGENT_AUDIENCE':     os.getenv('PINGONE_AGENT_AUDIENCE', ''),
+    'PINGONE_MCP_AUDIENCE':       os.getenv('PINGONE_MCP_AUDIENCE', ''),
+    'VERTEX_REASONING_ENGINE_ID': os.getenv('VERTEX_REASONING_ENGINE_ID', ''),
 }
 
 
