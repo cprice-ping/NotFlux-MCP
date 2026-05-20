@@ -16,8 +16,8 @@ const PORT = Number(process.env.PORT ?? 8080);
 
 /**
  * The `aud` claim value that MCP-scoped tokens must carry.
- * Set via EXPECTED_AUDIENCE env var — should match the PingOne resource
- * that the backend Token Exchange (RFC 8693) targets (PINGONE_MCP_AUDIENCE).
+ * Set via EXPECTED_AUDIENCE env var — should match the aud that PingOne stamps
+ * on the mcp_token (determined by the scope in PINGONE_MCP_SCOPE on the agent).
  * When unset, audience validation is skipped (useful for local dev with curl).
  */
 const EXPECTED_AUDIENCE = process.env.EXPECTED_AUDIENCE ?? "";

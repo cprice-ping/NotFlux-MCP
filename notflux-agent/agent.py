@@ -75,8 +75,8 @@ _PINGONE_CLIENT_ID     = os.getenv('PINGONE_CLIENT_ID', '')
 _PINGONE_CLIENT_SECRET = os.getenv('PINGONE_CLIENT_SECRET', '')
 # Audience the agent_token must carry (aud check before Exchange 2)
 _PINGONE_AGENT_AUDIENCE = os.getenv('PINGONE_AGENT_AUDIENCE', '')
-# Audience to request in Exchange 2 (the MCP resource server)
-_PINGONE_MCP_AUDIENCE   = os.getenv('PINGONE_MCP_AUDIENCE', '')
+# Scope to request in Exchange 2 — PingOne maps this to the MCP resource server aud
+_PINGONE_MCP_SCOPE      = os.getenv('PINGONE_MCP_SCOPE', '')
 
 # Simple in-process token cache: stripped_agent_token → (mcp_token, expires_at)
 _mcp_token_cache: dict[str, tuple[str, float]] = {}
@@ -105,14 +105,14 @@ def _exchange_for_mcp_token(agent_token: str) -> str:
 
     Performs RFC 8693 Token Exchange with:
       subject_token      — the agent_token from Vertex session state
-      audience           — PINGONE_MCP_AUDIENCE (notflux-mcp resource server)
+      scope              — PINGONE_MCP_SCOPE (PingOne maps it to the MCP resource server aud)
       agent_id           — Vertex Agent Engine resource path (custom claim)
 
     Results are cached by agent_token until 30 s before the token's expiry.
     Falls back to returning the original token when PingOne env vars are unset
     (useful for local dev or before P1 is wired up).
     """
-    if not all([_PINGONE_ENV_ID, _PINGONE_CLIENT_ID, _PINGONE_CLIENT_SECRET, _PINGONE_MCP_AUDIENCE]):
+    if not all([_PINGONE_ENV_ID, _PINGONE_CLIENT_ID, _PINGONE_CLIENT_SECRET, _PINGONE_MCP_SCOPE]):
         logging.warning('exchange_for_mcp: PingOne env vars not configured — using agent token directly')
         return agent_token
 
@@ -145,13 +145,14 @@ def _exchange_for_mcp_token(agent_token: str) -> str:
     ).decode()
 
     payload: dict[str, str] = {
-        'grant_type':         'urn:ietf:params:oauth:grant-type:token-exchange',
-        'subject_token':      agent_token,
+        'grant_type':            'urn:ietf:params:oauth:grant-type:token-exchange',
+        'subject_token':         agent_token,
         # access_token is semantically correct for a PingOne-issued OAuth token.
         # If the P1 Token Exchange policy is configured to expect a JWT assertion
         # instead, change this to: urn:ietf:params:oauth:token-type:jwt
-        'subject_token_type': 'urn:ietf:params:oauth:token-type:access_token',
-        'audience':           _PINGONE_MCP_AUDIENCE,
+        'subject_token_type':    'urn:ietf:params:oauth:token-type:access_token',
+        'requested_token_type':  'urn:ietf:params:oauth:token-type:access_token',
+        'scope':                 _PINGONE_MCP_SCOPE,
     }
     if agent_id:
         payload['agent_id'] = agent_id

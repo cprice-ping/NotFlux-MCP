@@ -56,7 +56,7 @@ AGENT_ENV_VARS = {
     'PINGONE_CLIENT_ID':      os.getenv('PINGONE_CLIENT_ID', ''),
     'PINGONE_CLIENT_SECRET':  os.getenv('PINGONE_CLIENT_SECRET', ''),
     'PINGONE_AGENT_AUDIENCE': os.getenv('PINGONE_AGENT_AUDIENCE', ''),
-    'PINGONE_MCP_AUDIENCE':   os.getenv('PINGONE_MCP_AUDIENCE', ''),
+    'PINGONE_MCP_SCOPE':      os.getenv('PINGONE_MCP_SCOPE', ''),
     # VERTEX_REASONING_ENGINE_ID is NOT injected here — Vertex does not expose
     # the engine's own resource ID to its runtime automatically, and passing it
     # at create-time creates a chicken-and-egg problem.  _get_vertex_agent_id()
@@ -73,7 +73,7 @@ def create_agent() -> AgentEngine:
         requirements=REQUIREMENTS,
         extra_packages=['agent.py'],
         display_name='NotFlux',
-        description='NotFlux AI assistant with per-session authenticated MCP tool access',
+        description='NotFlux AI assistant with PingOne Token Exchange for MCP access',
         env_vars=AGENT_ENV_VARS,
     )
     resource_id = engine.resource_name.split('/')[-1]

@@ -28,15 +28,13 @@ const P1_ENV_ID =
 const P1_TOKEN_URL = `https://auth.pingone.com/${P1_ENV_ID}/as/token`;
 const P1_TX_CLIENT_ID = process.env.PINGONE_TX_CLIENT_ID ?? '';      // confidential backend client
 const P1_TX_CLIENT_SECRET = process.env.PINGONE_TX_CLIENT_SECRET ?? '';
-// Exchange 1 target: the Vertex Agent resource server audience
-const P1_AGENT_AUDIENCE = process.env.PINGONE_AGENT_AUDIENCE ?? '';
-// Optional extra scopes to request on the exchanged token (e.g. use_agent)
-const P1_AGENT_SCOPE = process.env.PINGONE_AGENT_SCOPE ?? '';
+// Scope that PingOne maps to the agent resource server audience (e.g. use_agent)
+const P1_AGENT_SCOPE = process.env.PINGONE_AGENT_SCOPE ?? 'use_agent';
 
 const TOKEN_EXCHANGE_ENABLED =
   Boolean(P1_TX_CLIENT_ID) &&
   Boolean(P1_TX_CLIENT_SECRET) &&
-  Boolean(P1_AGENT_AUDIENCE);
+  Boolean(P1_AGENT_SCOPE);
 
 interface HitlChallenge {
   hitl_required: true;
@@ -187,9 +185,9 @@ function findHitlChallenge(value: unknown): HitlChallenge | null {
 }
 
 if (TOKEN_EXCHANGE_ENABLED) {
-  console.log(`Token Exchange enabled → audience: ${P1_AGENT_AUDIENCE}`);
+  console.log(`Token Exchange enabled → scope: ${P1_AGENT_SCOPE}`);
 } else {
-  console.log('Token Exchange disabled — set PINGONE_TX_CLIENT_ID/SECRET/AGENT_AUDIENCE to enable');
+  console.log('Token Exchange disabled — set PINGONE_TX_CLIENT_ID/SECRET and PINGONE_AGENT_SCOPE to enable');
 }
 
 /**
@@ -208,8 +206,7 @@ async function tokenExchange(subjectToken: string): Promise<string> {
     subject_token: subjectToken,
     subject_token_type: 'urn:ietf:params:oauth:token-type:access_token',
     requested_token_type: 'urn:ietf:params:oauth:token-type:access_token',
-    audience: P1_AGENT_AUDIENCE,
-    ...(P1_AGENT_SCOPE ? { scope: P1_AGENT_SCOPE } : {}),
+    scope: P1_AGENT_SCOPE,
   });
 
   // client_secret_basic — credentials in Authorization header
