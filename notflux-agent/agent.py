@@ -50,6 +50,7 @@ DEPLOYMENT PATTERN:
 """
 
 import base64
+import json
 import logging
 import os
 import time
@@ -69,10 +70,13 @@ MCP_URL = 'https://notflux-mcp.ping-devops.com/mcp?rev=2'
 # PingOne Token Exchange — Exchange 2: agent_token → mcp_token
 # Set these in the Vertex AI Agent Engine runtime environment.
 # ---------------------------------------------------------------------------
-_PINGONE_ENV_ID       = os.getenv('PINGONE_ENV_ID', '')
-_PINGONE_CLIENT_ID    = os.getenv('PINGONE_CLIENT_ID', '')
+_PINGONE_ENV_ID        = os.getenv('PINGONE_ENV_ID', '')
+_PINGONE_CLIENT_ID     = os.getenv('PINGONE_CLIENT_ID', '')
 _PINGONE_CLIENT_SECRET = os.getenv('PINGONE_CLIENT_SECRET', '')
-_PINGONE_MCP_AUDIENCE  = os.getenv('PINGONE_MCP_AUDIENCE', '')
+# Audience the agent_token must carry (aud check before Exchange 2)
+_PINGONE_AGENT_AUDIENCE = os.getenv('PINGONE_AGENT_AUDIENCE', '')
+# Audience to request in Exchange 2 (the MCP resource server)
+_PINGONE_MCP_AUDIENCE   = os.getenv('PINGONE_MCP_AUDIENCE', '')
 
 # Simple in-process token cache: stripped_agent_token → (mcp_token, expires_at)
 _mcp_token_cache: dict[str, tuple[str, float]] = {}
@@ -107,6 +111,21 @@ def _exchange_for_mcp_token(agent_token: str) -> str:
     if not all([_PINGONE_ENV_ID, _PINGONE_CLIENT_ID, _PINGONE_CLIENT_SECRET, _PINGONE_MCP_AUDIENCE]):
         logging.warning('exchange_for_mcp: PingOne env vars not configured — using agent token directly')
         return agent_token
+
+    # Validate that the token from session state was issued for this agent.
+    # Decode the JWT payload (no sig verification — PingOne verifies in Exchange 2).
+    if _PINGONE_AGENT_AUDIENCE:
+        try:
+            parts = agent_token.split('.')
+            padded = parts[1] + '=' * (-len(parts[1]) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(padded).decode())
+            aud = payload.get('aud', [])
+            if isinstance(aud, str):
+                aud = [aud]
+            if _PINGONE_AGENT_AUDIENCE not in aud:
+                raise ValueError(f'aud={aud!r} does not contain {_PINGONE_AGENT_AUDIENCE!r}')
+        except Exception as exc:
+            raise RuntimeError(f'exchange_for_mcp: agent_token audience validation failed — {exc}')
 
     cached = _mcp_token_cache.get(agent_token)
     if cached and time.time() < cached[1]:
@@ -174,8 +193,10 @@ def inject_mcp_auth(callback_context: CallbackContext) -> Optional[types.Content
         mcp_token = _exchange_for_mcp_token(agent_token)
         mcp_auth  = f'Bearer {mcp_token}'
     except Exception as exc:
-        logging.error(f'inject_mcp_auth: exchange failed — {exc}. Falling back to agent token.')
-        mcp_auth = auth
+        # Do NOT fall back to the agent_token — it carries the wrong audience
+        # for MCP calls and would be rejected by the MCP server.
+        logging.error(f'inject_mcp_auth: exchange failed — {exc}. MCP tools unavailable this turn.')
+        return None
 
     agent = callback_context._invocation_context.agent
     non_mcp = [t for t in agent.tools if not isinstance(t, McpToolset)]
