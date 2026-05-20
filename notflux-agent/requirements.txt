@@ -1,2 +1,3 @@
 google-cloud-aiplatform[adk,reasoningengine]>=1.87.0
 google-adk>=0.4.0
+requests>=2.32.0

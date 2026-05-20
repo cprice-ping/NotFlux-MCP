@@ -35,7 +35,18 @@ STAGING_BUCKET = 'gs://notflux-agent-staging'  # must exist in the project
 REQUIREMENTS = [
     'google-cloud-aiplatform[adk,reasoningengine]',
     'google-adk>=0.4.0',
+    'requests>=2.32.0',    # Exchange 2: agent_token -> mcp_token via PingOne
 ]
+
+# ---------------------------------------------------------------------------
+# PingOne env vars required in the Vertex Agent Engine runtime
+# Configure these in the Agent Engine environment after deployment:
+#   PINGONE_ENV_ID            — PingOne environment UUID
+#   PINGONE_CLIENT_ID         — Confidential client for Exchange 2 (agent -> mcp)
+#   PINGONE_CLIENT_SECRET     — Client secret
+#   PINGONE_MCP_AUDIENCE      — aud of the MCP resource server (notflux-mcp)
+#   VERTEX_REASONING_ENGINE_ID — Engine ID for agent_id claim (optional)
+# ---------------------------------------------------------------------------
 
 
 def create_agent() -> AgentEngine:

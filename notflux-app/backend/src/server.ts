@@ -28,15 +28,15 @@ const P1_ENV_ID =
 const P1_TOKEN_URL = `https://auth.pingone.com/${P1_ENV_ID}/as/token`;
 const P1_TX_CLIENT_ID = process.env.PINGONE_TX_CLIENT_ID ?? '';      // confidential backend client
 const P1_TX_CLIENT_SECRET = process.env.PINGONE_TX_CLIENT_SECRET ?? '';
-// The audience the MCP Server validates — e.g. the MCP resource server's client_id in PingOne
-const P1_MCP_AUDIENCE = process.env.PINGONE_MCP_AUDIENCE ?? '';
-// Optional extra scopes to request on the exchanged token
-const P1_MCP_SCOPE = process.env.PINGONE_MCP_SCOPE ?? '';
+// Exchange 1 target: the Vertex Agent resource server audience
+const P1_AGENT_AUDIENCE = process.env.PINGONE_AGENT_AUDIENCE ?? '';
+// Optional extra scopes to request on the exchanged token (e.g. use_agent)
+const P1_AGENT_SCOPE = process.env.PINGONE_AGENT_SCOPE ?? '';
 
 const TOKEN_EXCHANGE_ENABLED =
   Boolean(P1_TX_CLIENT_ID) &&
   Boolean(P1_TX_CLIENT_SECRET) &&
-  Boolean(P1_MCP_AUDIENCE);
+  Boolean(P1_AGENT_AUDIENCE);
 
 interface HitlChallenge {
   hitl_required: true;
@@ -187,9 +187,9 @@ function findHitlChallenge(value: unknown): HitlChallenge | null {
 }
 
 if (TOKEN_EXCHANGE_ENABLED) {
-  console.log(`Token Exchange enabled → audience: ${P1_MCP_AUDIENCE}`);
+  console.log(`Token Exchange enabled → audience: ${P1_AGENT_AUDIENCE}`);
 } else {
-  console.log('Token Exchange disabled — set PINGONE_TX_CLIENT_ID/SECRET/MCP_AUDIENCE to enable');
+  console.log('Token Exchange disabled — set PINGONE_TX_CLIENT_ID/SECRET/AGENT_AUDIENCE to enable');
 }
 
 /**
@@ -208,8 +208,8 @@ async function tokenExchange(subjectToken: string): Promise<string> {
     subject_token: subjectToken,
     subject_token_type: 'urn:ietf:params:oauth:token-type:access_token',
     requested_token_type: 'urn:ietf:params:oauth:token-type:access_token',
-    audience: P1_MCP_AUDIENCE,
-    ...(P1_MCP_SCOPE ? { scope: P1_MCP_SCOPE } : {}),
+    audience: P1_AGENT_AUDIENCE,
+    ...(P1_AGENT_SCOPE ? { scope: P1_AGENT_SCOPE } : {}),
   });
 
   // client_secret_basic — credentials in Authorization header

@@ -20,16 +20,18 @@ TOKEN FLOW:
   NotFlux App backend                   Vertex Agent Engine
   ───────────────────                   ──────────────────────────────────
   POST /api/sessions                    Session state:
-    person_token ──[Exchange 1]──────►  pingone_authorization: "Bearer mcp_token"
-    → mcp_token                                       │
-                                                      │  inject_mcp_auth reads
-                                                      │  state on every turn
-                                                      ▼
+    person_token ──[Exchange 1]──────►  pingone_authorization: "Bearer agent_token"
+    → agent_token (aud=notflux-agent)             │
+                                                  │  inject_mcp_auth reads state,
+                                                  │  performs Exchange 2 per turn:
+                                                  │  agent_token ──[Exchange 2]──► mcp_token
+                                                  │  agent_id=<vertex_engine_id>       │
+                                                  ▼                                    │
   POST /api/chat                        McpToolset(headers={"Authorization": mcp_token})
     message ─────────────────────────►                │
                                                       ▼
                                         MCP Server validates aud=notflux-mcp
-                                        Exchange 2: mcp_token → api_token
+                                        Exchange 3: mcp_token → kong_token
                                                       │
                                                       ▼
                                         Kong Gateway + PingOne AAM
@@ -47,9 +49,14 @@ DEPLOYMENT PATTERN:
   loads Vertex session state (including pingone_authorization) on every turn.
 """
 
+import base64
 import logging
+import os
+import time
 from typing import Optional
+from urllib.parse import quote
 
+import requests as http_requests
 from google.adk.agents import llm_agent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
@@ -57,6 +64,87 @@ from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.genai import types
 
 MCP_URL = 'https://notflux-mcp.ping-devops.com/mcp?rev=2'
+
+# ---------------------------------------------------------------------------
+# PingOne Token Exchange — Exchange 2: agent_token → mcp_token
+# Set these in the Vertex AI Agent Engine runtime environment.
+# ---------------------------------------------------------------------------
+_PINGONE_ENV_ID       = os.getenv('PINGONE_ENV_ID', '')
+_PINGONE_CLIENT_ID    = os.getenv('PINGONE_CLIENT_ID', '')
+_PINGONE_CLIENT_SECRET = os.getenv('PINGONE_CLIENT_SECRET', '')
+_PINGONE_MCP_AUDIENCE  = os.getenv('PINGONE_MCP_AUDIENCE', '')
+
+# Simple in-process token cache: stripped_agent_token → (mcp_token, expires_at)
+_mcp_token_cache: dict[str, tuple[str, float]] = {}
+
+
+def _get_vertex_agent_id() -> str:
+    """Return the Vertex Agent Engine resource path for use as a custom claim.
+
+    Reads standard GCP runtime env vars; returns an empty string when they are
+    not available so the exchange still proceeds without the claim.
+    """
+    project  = os.getenv('GOOGLE_CLOUD_PROJECT') or os.getenv('CLOUD_ML_PROJECT_ID', '')
+    location = os.getenv('VERTEX_LOCATION', os.getenv('CLOUD_ML_REGION', 'us-west1'))
+    engine   = os.getenv('VERTEX_REASONING_ENGINE_ID', '')
+    if project and engine:
+        return f'projects/{project}/locations/{location}/reasoningEngines/{engine}'
+    return ''
+
+
+def _exchange_for_mcp_token(agent_token: str) -> str:
+    """Exchange an agent-scoped PingOne token for an MCP-scoped token.
+
+    Performs RFC 8693 Token Exchange with:
+      subject_token      — the agent_token from Vertex session state
+      audience           — PINGONE_MCP_AUDIENCE (notflux-mcp resource server)
+      agent_id           — Vertex Agent Engine resource path (custom claim)
+
+    Results are cached by agent_token until 30 s before the token's expiry.
+    Falls back to returning the original token when PingOne env vars are unset
+    (useful for local dev or before P1 is wired up).
+    """
+    if not all([_PINGONE_ENV_ID, _PINGONE_CLIENT_ID, _PINGONE_CLIENT_SECRET, _PINGONE_MCP_AUDIENCE]):
+        logging.warning('exchange_for_mcp: PingOne env vars not configured — using agent token directly')
+        return agent_token
+
+    cached = _mcp_token_cache.get(agent_token)
+    if cached and time.time() < cached[1]:
+        logging.debug('exchange_for_mcp: cache_hit')
+        return cached[0]
+
+    agent_id  = _get_vertex_agent_id()
+    token_url = f'https://auth.pingone.com/{_PINGONE_ENV_ID}/as/token'
+
+    # client_secret_basic — credentials in Authorization header (same as backend)
+    basic_cred = base64.b64encode(
+        f'{quote(_PINGONE_CLIENT_ID)}:{quote(_PINGONE_CLIENT_SECRET)}'.encode()
+    ).decode()
+
+    payload: dict[str, str] = {
+        'grant_type':        'urn:ietf:params:oauth:grant-type:token-exchange',
+        'subject_token':     agent_token,
+        'subject_token_type':'urn:ietf:params:oauth:token-type:access_token',
+        'audience':          _PINGONE_MCP_AUDIENCE,
+    }
+    if agent_id:
+        payload['agent_id'] = agent_id
+
+    logging.info(f'exchange_for_mcp: POST {token_url} agent_id={agent_id or "(none)"}')
+    resp = http_requests.post(
+        token_url,
+        data=payload,
+        headers={'Authorization': f'Basic {basic_cred}'},
+        timeout=10,
+    )
+    resp.raise_for_status()
+
+    result      = resp.json()
+    mcp_token   = result['access_token']
+    expires_in  = int(result.get('expires_in', 3600))
+    _mcp_token_cache[agent_token] = (mcp_token, time.time() + expires_in - 30)
+    logging.info('exchange_for_mcp: ok')
+    return mcp_token
 
 
 def inject_mcp_auth(callback_context: CallbackContext) -> Optional[types.Content]:
@@ -79,13 +167,23 @@ def inject_mcp_auth(callback_context: CallbackContext) -> Optional[types.Content
         # No token in session state — MCP tools not available this turn.
         return None
 
+    # Strip "Bearer " prefix before using as subject_token in the exchange.
+    agent_token = auth.removeprefix('Bearer ').strip()
+
+    try:
+        mcp_token = _exchange_for_mcp_token(agent_token)
+        mcp_auth  = f'Bearer {mcp_token}'
+    except Exception as exc:
+        logging.error(f'inject_mcp_auth: exchange failed — {exc}. Falling back to agent token.')
+        mcp_auth = auth
+
     agent = callback_context._invocation_context.agent
     non_mcp = [t for t in agent.tools if not isinstance(t, McpToolset)]
     agent.tools = non_mcp + [
         McpToolset(
             connection_params=StreamableHTTPConnectionParams(
                 url=MCP_URL,
-                headers={'Authorization': auth},
+                headers={'Authorization': mcp_auth},
             )
         )
     ]
