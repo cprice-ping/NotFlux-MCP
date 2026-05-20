@@ -39,15 +39,24 @@ REQUIREMENTS = [
 ]
 
 # ---------------------------------------------------------------------------
-# PingOne env vars required in the Vertex Agent Engine runtime
-# Configure these in the Agent Engine environment after deployment:
-#   PINGONE_ENV_ID             — PingOne environment UUID
-#   PINGONE_CLIENT_ID          — Confidential client for Exchange 2 (agent -> mcp)
-#   PINGONE_CLIENT_SECRET      — Client secret
-#   PINGONE_AGENT_AUDIENCE     — aud the agent_token must carry (issued by backend Exchange 1)
-#   PINGONE_MCP_AUDIENCE       — aud to request in Exchange 2 (MCP resource server)
-#   VERTEX_REASONING_ENGINE_ID — Engine ID for agent_id claim (optional)
+# PingOne Token Exchange env vars injected into the Agent Engine runtime.
+# Fill in the blanks once PingOne clients are configured.
+#
+# In production, move PINGONE_CLIENT_SECRET to GCP Secret Manager and
+# reference it as {"PINGONE_CLIENT_SECRET": "secret:<version>"} in
+# secret_env_vars instead.
+#
+# VERTEX_REASONING_ENGINE_ID: fill in after the first --create run
+# (it's the numeric ID printed at the end of the create output).
 # ---------------------------------------------------------------------------
+AGENT_ENV_VARS = {
+    'PINGONE_ENV_ID':             '59bb6a66-e76e-490c-b83a-884c50423da4',
+    'PINGONE_CLIENT_ID':          '',  # Exchange 2 client id  — set after P1 wiring
+    'PINGONE_CLIENT_SECRET':      '',  # Exchange 2 client secret — set after P1 wiring
+    'PINGONE_AGENT_AUDIENCE':     '',  # aud expected on incoming agent_token (= PINGONE_AGENT_AUDIENCE in backend)
+    'PINGONE_MCP_AUDIENCE':       '',  # aud to request for mcp_token  (= MCP resource server)
+    'VERTEX_REASONING_ENGINE_ID': '',  # set after first --create run
+}
 
 
 def create_agent() -> AgentEngine:
@@ -59,6 +68,7 @@ def create_agent() -> AgentEngine:
         extra_packages=['agent.py'],
         display_name='NotFlux',
         description='NotFlux AI assistant with per-session authenticated MCP tool access',
+        env_vars=AGENT_ENV_VARS,
     )
     resource_id = engine.resource_name.split('/')[-1]
     print(f'Created: {engine.resource_name}')
@@ -76,6 +86,7 @@ def update_agent(resource_id: str) -> AgentEngine:
         agent_engine=app,
         requirements=REQUIREMENTS,
         extra_packages=['agent.py'],
+        env_vars=AGENT_ENV_VARS,
     )
     print(f'Updated: {engine.resource_name}')
     return engine
