@@ -1,0 +1,85 @@
+{
+  "name": "notflux-mcp-proxy",
+  "condition": "${find(request.uri.path, '^/mcp')}",
+  "heap": [
+    {
+      "name": "rsFilter",
+      "type": "OAuth2ResourceServerFilter",
+      "config": {
+        "requireHttps": false,
+        "scopes": [ "use_mcp" ],
+        "accessTokenResolver": {
+          "type": "StatelessAccessTokenResolver",
+          "config": {
+            "issuer": "https://auth.pingone.com/59bb6a66-e76e-490c-b83a-884c50423da4/as",
+            "verificationSecretId": "verify.mcp.token",
+            "secretsProvider": {
+              "type": "SecretsProvider",
+              "config": {
+                "stores": [
+                  {
+                    "type": "JwkSetSecretStore",
+                    "config": {
+                      "jwkUrl": "https://auth.pingone.com/59bb6a66-e76e-490c-b83a-884c50423da4/as/jwks"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "gatewayUrl":             "https://notflux-gateway.ping-devops.com",
+    "authorizationServerUri": "https://auth.pingone.com/59bb6a66-e76e-490c-b83a-884c50423da4/as",
+    "mcpServerUrl":           "https://notflux-mcp.ping-devops.com",
+    "mcpServerAudience":      "https://notflux-mcp.ping-devops.com",
+    "agentFacingScope":       "use_mcp",
+    "mcpServerScope":         "use_mcp"
+  },
+  "baseURI": "&{mcpServerUrl}",
+  "handler": {
+    "type": "Chain",
+    "config": {
+      "filters": [
+        {
+          "type": "UriPathRewriteFilter",
+          "config": { "mappings": { "/mcp": "/mcp" } }
+        },
+        {
+          "type": "McpProtectionFilter",
+          "config": {
+            "resourceId": "&{gatewayUrl}/mcp",
+            "authorizationServerUri": "&{authorizationServerUri}",
+            "resourceServerFilter": "rsFilter",
+            "supportedScopes": [ "&{agentFacingScope}" ],
+            "resourceIdPointer": "/aud"
+          }
+        },
+        {
+          "type": "McpValidationFilter",
+          "config": { "acceptedOrigins": ".*" }
+        },
+        {
+          "type": "ScriptableFilter",
+          "config": {
+            "type": "application/x-groovy",
+            "file": "TokenExchange.groovy",
+            "args": {
+              "tokenEndpoint":  "&{authorizationServerUri}/token",
+              "clientId":       "${env['PINGONE_TE_CLIENT_ID']}",
+              "clientSecret":   "${env['PINGONE_TE_CLIENT_SECRET']}",
+              "requestedScope": "&{mcpServerScope}"
+            }
+          }
+        }
+      ],
+      "handler": {
+        "type": "ReverseProxyHandler",
+        "config": { "soTimeout": "30 seconds" }
+      }
+    }
+  }
+}

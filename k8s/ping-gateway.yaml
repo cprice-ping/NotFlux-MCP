@@ -1,3 +1,143 @@
+# ---------------------------------------------------------------------------
+# PingGateway — Secret, ConfigMap, Deployment, Service, Ingress
+# Namespace: ping-devops-cprice
+#
+# Before applying: populate ping-gateway-secrets with your TE client credentials.
+#   kubectl create secret generic ping-gateway-secrets \
+#     --namespace ping-devops-cprice \
+#     --from-literal=PINGONE_TE_CLIENT_ID=<client-id> \
+#     --from-literal=PINGONE_TE_CLIENT_SECRET=<client-secret>
+#
+# Token flow:  Agent --(mcp_token)--> PingGateway
+#              PingGateway validates (McpProtectionFilter)
+#              PingGateway exchanges (TokenExchange.groovy) --> backend mcp_token
+#              PingGateway proxies --> https://notflux-mcp.ping-devops.com
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ping-gateway-secrets
+  namespace: ping-devops-cprice
+type: Opaque
+stringData:
+  PINGONE_TE_CLIENT_ID:     "97596196-52b4-4237-8853-651cb5594cf6"   # fill before applying
+  PINGONE_TE_CLIENT_SECRET: "~xv3rTpLCFe~.5tVXZVhIqJGVcWS2aEDn5fXKhqvDE5d3OXcZRWtA.3J~24abqT_"   # fill before applying
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ping-gateway-config
+  namespace: ping-devops-cprice
+data:
+  admin.json: |
+    {
+      "mode": "PRODUCTION",
+      "streamingEnabled": true
+    }
+
+  notflux-mcp-proxy.json: |
+    {
+      "name": "notflux-mcp-proxy",
+      "condition": "${find(request.uri.path, '^/mcp')}",
+      "properties": {
+        "gatewayUrl":             "https://notflux-gateway.ping-devops.com",
+        "authorizationServerUri": "https://auth.pingone.com/59bb6a66-e76e-490c-b83a-884c50423da4/as",
+        "mcpServerUrl":           "https://notflux-mcp.ping-devops.com",
+        "agentFacingScope":       "use_mcp",
+        "mcpServerScope":         "use_mcp"
+      },
+      "baseURI": "&{mcpServerUrl}",
+      "handler": {
+        "type": "Chain",
+        "config": {
+          "filters": [
+            {
+              "type": "UriPathRewriteFilter",
+              "config": { "mappings": { "/mcp": "/mcp" } }
+            },
+            {
+              "type": "McpProtectionFilter",
+              "config": {
+                "resourceId": "&{gatewayUrl}/mcp",
+                "authorizationServerUri": "&{authorizationServerUri}",
+                "resourceServerFilter": "rsFilter",
+                "supportedScopes": [ "&{agentFacingScope}" ],
+                "resourceIdPointer": "/audience"
+              }
+            },
+            {
+              "type": "McpValidationFilter",
+              "config": { "acceptedOrigins": ".*" }
+            },
+            {
+              "type": "ScriptableFilter",
+              "config": {
+                "type": "application/x-groovy",
+                "file": "scripts/groovy/TokenExchange.groovy",
+                "args": {
+                  "tokenEndpoint":  "&{authorizationServerUri}/token",
+                  "clientId":       "${env['PINGONE_TE_CLIENT_ID']}",
+                  "clientSecret":   "${env['PINGONE_TE_CLIENT_SECRET']}",
+                  "requestedScope": "&{mcpServerScope}"
+                }
+              }
+            }
+          ],
+          "handler": {
+            "type": "ReverseProxyHandler",
+            "config": { "soTimeout": "30 seconds" }
+          }
+        }
+      }
+    }
+
+  TokenExchange.groovy: |
+    import org.forgerock.http.protocol.*
+
+    def clientId       = args.clientId       as String
+    def clientSecret   = args.clientSecret   as String
+    def tokenEndpoint  = args.tokenEndpoint  as String
+    def requestedScope = args.requestedScope as String
+
+    if (!clientId || !clientSecret) {
+        logger.warn('TokenExchange: credentials not set — returning 401')
+        return new Response(Status.UNAUTHORIZED)
+    }
+
+    def incomingAuth = request.headers['Authorization']?.firstValue
+    if (!incomingAuth?.startsWith('Bearer ')) {
+        logger.warn('TokenExchange: no Bearer token — returning 401')
+        return new Response(Status.UNAUTHORIZED)
+    }
+    def subjectToken = incomingAuth.substring(7)
+
+    def credentials = "${clientId}:${clientSecret}".bytes.encodeBase64().toString()
+
+    def teRequest = new Request()
+    teRequest.method = 'POST'
+    teRequest.uri = new URI(tokenEndpoint)
+    teRequest.headers.put('Authorization', "Basic ${credentials}")
+    teRequest.headers.put('Content-Type', 'application/x-www-form-urlencoded')
+    teRequest.entity.setString(
+        "grant_type=${URLEncoder.encode('urn:ietf:params:oauth:grant-type:token-exchange', 'UTF-8')}" +
+        "&subject_token=${URLEncoder.encode(subjectToken, 'UTF-8')}" +
+        "&subject_token_type=${URLEncoder.encode('urn:ietf:params:oauth:token-type:access_token', 'UTF-8')}" +
+        "&requested_token_type=${URLEncoder.encode('urn:ietf:params:oauth:token-type:access_token', 'UTF-8')}" +
+        "&scope=${URLEncoder.encode(requestedScope, 'UTF-8')}"
+    )
+
+    logger.debug("TokenExchange: POST ${tokenEndpoint} scope=${requestedScope}")
+    def teResponse = http.send(teRequest).get()
+    if (teResponse.status.code != 200) {
+        logger.error("TokenExchange: PingOne returned ${teResponse.status.code}")
+        return new Response(Status.UNAUTHORIZED)
+    }
+
+    def json = teResponse.entity.json
+    request.headers.put('Authorization', "Bearer ${json['access_token']}")
+    logger.debug('TokenExchange: ok — Authorization replaced')
+    return next.handle(context, request)
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,17 +161,28 @@ spec:
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
+          env:
+            - name: PINGONE_TE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: ping-gateway-secrets
+                  key: PINGONE_TE_CLIENT_ID
+            - name: PINGONE_TE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ping-gateway-secrets
+                  key: PINGONE_TE_CLIENT_SECRET
           livenessProbe:
             httpGet:
               path: /
               port: 8080
-            initialDelaySeconds: 15
-            periodSeconds: 20
+            initialDelaySeconds: 20
+            periodSeconds: 30
           readinessProbe:
             httpGet:
               path: /
               port: 8080
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 10
           resources:
             requests:
@@ -50,12 +201,24 @@ spec:
           volumeMounts:
             - name: gateway-instance
               mountPath: /var/gateway
+            - name: gateway-config
+              mountPath: /var/gateway/config/admin.json
+              subPath: admin.json
+            - name: gateway-config
+              mountPath: /var/gateway/config/routes/notflux-mcp-proxy.json
+              subPath: notflux-mcp-proxy.json
+            - name: gateway-config
+              mountPath: /var/gateway/scripts/groovy/TokenExchange.groovy
+              subPath: TokenExchange.groovy
       securityContext:
         seccompProfile:
           type: RuntimeDefault
       volumes:
         - name: gateway-instance
           emptyDir: {}
+        - name: gateway-config
+          configMap:
+            name: ping-gateway-config
 ---
 apiVersion: v1
 kind: Service
@@ -80,8 +243,9 @@ metadata:
     cert-manager.io/cluster-issuer: letsencrypt-ping-cloud
     nginx.ingress.kubernetes.io/backend-protocol: HTTP
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
 spec:
   ingressClassName: nginx-public
   tls:
