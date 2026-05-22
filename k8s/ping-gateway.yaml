@@ -39,12 +39,43 @@ data:
     {
       "name": "notflux-mcp-proxy",
       "condition": "${find(request.uri.path, '^/mcp')}",
+      "heap": [
+        {
+          "name": "rsFilter",
+          "type": "OAuth2ResourceServerFilter",
+          "config": {
+            "requireHttps": false,
+            "scopes": [ "use_gateway" ],
+            "accessTokenResolver": {
+              "type": "StatelessAccessTokenResolver",
+              "config": {
+                "issuer": "https://auth.pingone.com/59bb6a66-e76e-490c-b83a-884c50423da4/as",
+                "verificationSecretId": "verify.gateway.token",
+                "secretsProvider": {
+                  "type": "SecretsProvider",
+                  "config": {
+                    "stores": [
+                      {
+                        "type": "JwkSetSecretStore",
+                        "config": {
+                          "jwkUrl": "https://auth.pingone.com/59bb6a66-e76e-490c-b83a-884c50423da4/as/jwks"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
       "properties": {
         "gatewayUrl":             "https://notflux-gateway.ping-devops.com",
         "authorizationServerUri": "https://auth.pingone.com/59bb6a66-e76e-490c-b83a-884c50423da4/as",
         "mcpServerUrl":           "https://notflux-mcp.ping-devops.com",
-        "agentFacingScope":       "use_mcp",
-        "mcpServerScope":         "use_mcp"
+        "mcpServerAudience":      "https://notflux-mcp.ping-devops.com",
+        "agentFacingScope":       "use_gateway",
+        "mcpServerScope":         "use_mcp_tools"
       },
       "baseURI": "&{mcpServerUrl}",
       "handler": {
@@ -62,7 +93,7 @@ data:
                 "authorizationServerUri": "&{authorizationServerUri}",
                 "resourceServerFilter": "rsFilter",
                 "supportedScopes": [ "&{agentFacingScope}" ],
-                "resourceIdPointer": "/audience"
+                "resourceIdPointer": "/aud"
               }
             },
             {
@@ -73,7 +104,7 @@ data:
               "type": "ScriptableFilter",
               "config": {
                 "type": "application/x-groovy",
-                "file": "scripts/groovy/TokenExchange.groovy",
+                "file": "TokenExchange.groovy",
                 "args": {
                   "tokenEndpoint":  "&{authorizationServerUri}/token",
                   "clientId":       "${env['PINGONE_TE_CLIENT_ID']}",

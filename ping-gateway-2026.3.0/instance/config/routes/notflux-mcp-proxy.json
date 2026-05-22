@@ -7,12 +7,12 @@
       "type": "OAuth2ResourceServerFilter",
       "config": {
         "requireHttps": false,
-        "scopes": [ "use_mcp" ],
+        "scopes": [ "use_gateway" ],
         "accessTokenResolver": {
           "type": "StatelessAccessTokenResolver",
           "config": {
             "issuer": "https://auth.pingone.com/59bb6a66-e76e-490c-b83a-884c50423da4/as",
-            "verificationSecretId": "verify.mcp.token",
+            "verificationSecretId": "verify.gateway.token",
             "secretsProvider": {
               "type": "SecretsProvider",
               "config": {
@@ -36,8 +36,8 @@
     "authorizationServerUri": "https://auth.pingone.com/59bb6a66-e76e-490c-b83a-884c50423da4/as",
     "mcpServerUrl":           "https://notflux-mcp.ping-devops.com",
     "mcpServerAudience":      "https://notflux-mcp.ping-devops.com",
-    "agentFacingScope":       "use_mcp",
-    "mcpServerScope":         "use_mcp"
+    "agentFacingScope":       "use_gateway",
+    "mcpServerScope":         "use_mcp_tools"
   },
   "baseURI": "&{mcpServerUrl}",
   "handler": {
