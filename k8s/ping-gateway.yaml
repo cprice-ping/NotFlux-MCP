@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ping-gateway
+  namespace: ping-devops-cprice
+  labels:
+    app: ping-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ping-gateway
+  template:
+    metadata:
+      labels:
+        app: ping-gateway
+    spec:
+      containers:
+        - name: ping-gateway
+          image: docker.io/pricecs/ping-gateway:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 11111
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: gateway-instance
+              mountPath: /var/gateway
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: gateway-instance
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ping-gateway
+  namespace: ping-devops-cprice
+spec:
+  selector:
+    app: ping-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ping-gateway
+  namespace: ping-devops-cprice
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-ping-cloud
+    nginx.ingress.kubernetes.io/backend-protocol: HTTP
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+spec:
+  ingressClassName: nginx-public
+  tls:
+    - hosts:
+        - notflux-gateway.ping-devops.com
+      secretName: ping-gateway-tls
+  rules:
+    - host: notflux-gateway.ping-devops.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ping-gateway
+                port:
+                  number: 80
