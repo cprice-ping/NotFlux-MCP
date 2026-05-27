@@ -36,7 +36,7 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 from agent import root_agent
 
-PROJECT_ID = '3682147732'
+PROJECT_ID = 'cprice---agentic-demos'
 LOCATION = 'us-west1'
 STAGING_BUCKET = 'gs://notflux-agent-staging'  # must exist in the project
 

@@ -27,7 +27,7 @@ notflux-mcp-server  (MCP 2025-11-25)
     │
     │  Bearer request → NotFlux API / Kong
     ▼
-PingOne AIC  (resource server / policy engine)
+Kong / P1AZ  (resource server / policy engine)
 ```
 
 Two HITL event types are currently supported:
