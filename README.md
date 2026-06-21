@@ -67,6 +67,13 @@ See [docs/HITL.md](docs/HITL.md) for the full challenge format, backend detectio
 
 A `mcp_token` cannot be replayed against Kong. An `agent_token` cannot be replayed against the MCP server. **Blast radius is bounded at each hop by cryptographic audience enforcement**, not by firewall rules or application-layer checks.
 
+> **Where the crypto actually happens.** The MCP server's own `EXPECTED_AUDIENCE`
+> check decodes the JWT *without* verifying its signature — it is a fast routing
+> hint, not the cryptographic gate. The signature is verified at the PingGateway
+> edge (against the PingOne JWKS) and again by PingOne itself, which rejects any
+> forged or wrong-audience token at exchange time. A token that passes the local
+> `aud` check but is forged still fails the very next hop.
+
 Exchange 3 additionally selects scope **per tool call** — `get_media`, `manage_account`, `manage_profiles` — so the Kong token grants only the minimum privilege for the specific operation in flight.
 
 ---
@@ -127,6 +134,13 @@ Kong manages host-swapping, path restructuring, TLS/SNI, and all security mediat
 
 **PingOne Authorize / AAM is the policy brain.** The agent, app backend, and MCP server do not make authorization decisions — they pass tokens, execute requests, and relay policy outcomes.
 
+> **Canonical MCP edge.** The agent does not call the MCP pod directly. Its
+> `MCP_URL` points at the **PingGateway** (`notflux-gateway.ping-devops.com`,
+> `k8s/ping-gateway.yaml`), which validates the agent-facing token
+> (`use_gateway`), performs an `use_gateway → use_mcp_tools` token exchange, and
+> only then proxies to the MCP server. Keeping the gateway in-path means token
+> validation and exchange are enforced at the edge, not bypassed.
+
 ---
 
 ## Components
@@ -137,7 +151,7 @@ Kong manages host-swapping, path restructuring, TLS/SNI, and all security mediat
 | `notflux-app/frontend/` | React/Vite UI — PKCE login, chat, AG-UI OTP/QR HITL widgets |
 | `notflux-app/backend/` | Express bridge — Vertex session proxy, Exchange 1, SSE translation |
 | `notflux-agent/` | Vertex ADK agent — Exchange 2 in `before_agent_callback`, `inject_mcp_auth` |
-| `k8s/` | Kubernetes manifests for MCP server deployment |
+| `k8s/` | Kubernetes manifests — MCP server, and the **PingGateway** edge that fronts it |
 | `docs/HITL.md` | HITL architecture — challenge format, interrupt protocol, sequence diagram |
 
 ---

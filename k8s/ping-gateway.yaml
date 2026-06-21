@@ -2,11 +2,15 @@
 # PingGateway — Secret, ConfigMap, Deployment, Service, Ingress
 # Namespace: ping-devops-cprice
 #
-# Before applying: populate ping-gateway-secrets with your TE client credentials.
+# Before applying: create ping-gateway-secrets OUT OF BAND. Do NOT commit real
+# credentials to this file — the placeholders below are intentionally empty.
 #   kubectl create secret generic ping-gateway-secrets \
 #     --namespace ping-devops-cprice \
 #     --from-literal=PINGONE_TE_CLIENT_ID=<client-id> \
 #     --from-literal=PINGONE_TE_CLIENT_SECRET=<client-secret>
+# (or manage it via a SealedSecret / ExternalSecret). The Secret resource below
+# is a template only; `kubectl apply` will not overwrite a secret created out of
+# band unless its keys are non-empty here.
 #
 # Token flow:  Agent --(mcp_token)--> PingGateway
 #              PingGateway validates (McpProtectionFilter)
@@ -20,8 +24,9 @@ metadata:
   namespace: ping-devops-cprice
 type: Opaque
 stringData:
-  PINGONE_TE_CLIENT_ID:     "97596196-52b4-4237-8853-651cb5594cf6"   # fill before applying
-  PINGONE_TE_CLIENT_SECRET: "~xv3rTpLCFe~.5tVXZVhIqJGVcWS2aEDn5fXKhqvDE5d3OXcZRWtA.3J~24abqT_"   # fill before applying
+  # Populate out of band (see header). Leave empty in source control.
+  PINGONE_TE_CLIENT_ID:     ""
+  PINGONE_TE_CLIENT_SECRET: ""
 ---
 apiVersion: v1
 kind: ConfigMap

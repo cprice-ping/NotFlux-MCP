@@ -64,7 +64,12 @@ from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnecti
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.genai import types
 
-MCP_URL = 'https://notflux-mcp.ping-devops.com/mcp?rev=2'
+# Canonical edge: the PingGateway fronts the MCP server. It validates the
+# agent-facing token (use_gateway), performs the use_gateway -> use_mcp_tools
+# token exchange, and proxies to the MCP pod. Pointing the agent here (rather
+# than at notflux-mcp.ping-devops.com directly) keeps the gateway in the live
+# request path instead of bypassing it. Override with MCP_URL if needed.
+MCP_URL = os.getenv('MCP_URL', 'https://notflux-gateway.ping-devops.com/mcp')
 
 # ---------------------------------------------------------------------------
 # PingOne Token Exchange — Exchange 2: agent_token → mcp_token
@@ -131,8 +136,15 @@ def _exchange_for_mcp_token(agent_token: str) -> str:
         except Exception as exc:
             raise RuntimeError(f'exchange_for_mcp: agent_token audience validation failed — {exc}')
 
+    # Sweep expired entries so the cache doesn't grow unbounded with distinct
+    # (short-lived) agent tokens over the life of the process.
+    now = time.time()
+    if len(_mcp_token_cache) > 256:
+        for k in [k for k, (_, exp) in _mcp_token_cache.items() if exp <= now]:
+            del _mcp_token_cache[k]
+
     cached = _mcp_token_cache.get(agent_token)
-    if cached and time.time() < cached[1]:
+    if cached and now < cached[1]:
         logging.debug('exchange_for_mcp: cache_hit')
         return cached[0]
 

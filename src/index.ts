@@ -6,12 +6,19 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import express, { type Request, type Response } from "express";
 import { randomUUID } from "node:crypto";
+import {
+  type BearerChallenge,
+  parseBearerChallenge,
+  hasExpectedAudience as hasExpectedAudienceFor,
+  normalizePrimaryRef,
+  tokenPreview,
+} from "./lib.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-const NOTFLUX_API_BASE = "https://notflux-api.ping-devops.com";
+const NOTFLUX_API_BASE = process.env.NOTFLUX_API_BASE ?? "https://notflux-api.ping-devops.com";
 const PORT = Number(process.env.PORT ?? 8080);
 
 /**
@@ -19,8 +26,16 @@ const PORT = Number(process.env.PORT ?? 8080);
  * Set via EXPECTED_AUDIENCE env var — should match the aud that PingOne stamps
  * on the mcp_token (determined by the scope in PINGONE_MCP_SCOPE on the agent).
  * When unset, audience validation is skipped (useful for local dev with curl).
+ *
+ * NOTE: this check decodes the JWT WITHOUT verifying its signature — it is a
+ * routing hint, not cryptographic enforcement. A forged token is rejected
+ * downstream when PingOne validates it during Exchange 3 (and by the gateway,
+ * which verifies signatures against the PingOne JWKS).
  */
 const EXPECTED_AUDIENCE = process.env.EXPECTED_AUDIENCE ?? "";
+
+/** Bound the kong-token cache so a long-lived process can't grow unboundedly. */
+const KONG_TOKEN_CACHE_MAX = Number(process.env.KONG_TOKEN_CACHE_MAX ?? 1000);
 
 if (EXPECTED_AUDIENCE) {
   console.log(`Audience validation enabled — required aud: ${EXPECTED_AUDIENCE}`);
@@ -29,7 +44,8 @@ if (EXPECTED_AUDIENCE) {
 }
 
 // ---------------------------------------------------------------------------
-// Exchange 2: mcp_token → kong_token (RFC 8693 Token Exchange)
+// Exchange 3: mcp_token → kong_token (RFC 8693 Token Exchange)
+// (Numbering matches the README token chain: 1 backend, 2 agent, 3 MCP server.)
 // The MCP server receives an mcp-scoped token from the ADK agent, but Kong
 // requires a token with its own audience. This exchange is performed once per
 // unique mcp_token and the result is cached for the token's lifetime.
@@ -47,9 +63,9 @@ const EXCHANGE2_ENABLED =
   Boolean(PINGONE_KONG_AUDIENCE);
 
 if (EXCHANGE2_ENABLED) {
-  console.log(`Exchange 2 enabled — kong audience: ${PINGONE_KONG_AUDIENCE}`);
+  console.log(`Exchange 3 enabled — kong audience: ${PINGONE_KONG_AUDIENCE}`);
 } else {
-  console.warn("Exchange 2 not configured — set PINGONE_TX_CLIENT_ID/SECRET/KONG_AUDIENCE. MCP tools will fail against Kong.");
+  console.warn("Exchange 3 not configured — set PINGONE_TX_CLIENT_ID/SECRET/KONG_AUDIENCE. MCP tools will fail against Kong.");
 }
 
 /**
@@ -58,12 +74,6 @@ if (EXCHANGE2_ENABLED) {
  * Evicted after the kong_token's expires_in.
  */
 const kongTokenCache = new Map<string, string>();
-
-function tokenPreview(token: string): string {
-  if (!token) return "<empty>";
-  if (token.length <= 12) return "<redacted>";
-  return `${token.slice(0, 6)}...${token.slice(-4)}`;
-}
 
 /**
  * Exchange an mcp_token for a kong_token via RFC 8693 Token Exchange.
@@ -113,6 +123,12 @@ async function exchangeForKongToken(mcpToken: string, scope: string): Promise<st
   const data = await res.json() as { access_token?: string; expires_in?: number };
   if (!data.access_token) throw new Error("Exchange 2 response missing access_token");
 
+  // Bound cache size (FIFO eviction) so a long-running process with many
+  // distinct tokens can't grow without limit, independent of TTL eviction.
+  if (kongTokenCache.size >= KONG_TOKEN_CACHE_MAX) {
+    const oldest = kongTokenCache.keys().next().value;
+    if (oldest !== undefined) kongTokenCache.delete(oldest);
+  }
   kongTokenCache.set(cacheKey, data.access_token);
   // Evict after token expiry to avoid using stale tokens
   const ttl = (data.expires_in ?? 3600) * 1000;
@@ -125,15 +141,6 @@ async function exchangeForKongToken(mcpToken: string, scope: string): Promise<st
 // HITL types
 // ---------------------------------------------------------------------------
 
-interface BearerChallenge {
-  /** error= from WWW-Authenticate Bearer challenge — the HITL event type */
-  error: string;
-  errorDescription: string;
-  /** acr_values= — PingOne MFA transaction handle, passed back on retry */
-  transactionId: string;
-  maxAge?: number;
-}
-
 interface RequestContext {
   method: string;
   path: string;
@@ -145,91 +152,6 @@ type NotfluxResult =
   | { kind: "ok";    data: unknown }
   | { kind: "hitl";  challenge: BearerChallenge; ctx: RequestContext }
   | { kind: "error"; message: string; status: number };
-
-// ---------------------------------------------------------------------------
-// Bearer challenge parser (RFC 6750)
-// ---------------------------------------------------------------------------
-
-/**
- * Parses a WWW-Authenticate: Bearer header into a structured challenge.
- * Returns null if the header is absent, malformed, or missing error=/acr_values=.
- */
-function parseBearerChallenge(header: string): BearerChallenge | null {
-  if (!header.toLowerCase().startsWith("bearer ")) return null;
-  const params: Record<string, string> = {};
-  const re = /(\w+)="([^"]*)"/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(header)) !== null) {
-    params[m[1]] = m[2];
-  }
-  const error = params["error"];
-  const transactionId = params["acr_values"];
-  if (!error || !transactionId) return null;
-  return {
-    error,
-    errorDescription: params["error_description"] ?? error,
-    transactionId,
-    maxAge: params["max_age"] !== undefined ? Number(params["max_age"]) : undefined,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// JWT audience helper
-// ---------------------------------------------------------------------------
-
-/**
- * Decodes the payload of a JWT (base64url) and returns the `aud` claim.
- * Does NOT verify the signature — Kong handles that on the forwarded request.
- * Returns null if the token is malformed.
- */
-function jwtAudience(token: string): string | string[] | null {
-  const parts = token.split(".");
-  if (parts.length < 2) return null;
-  try {
-    const payload = JSON.parse(
-      Buffer.from(parts[1], "base64url").toString("utf8")
-    ) as Record<string, unknown>;
-    const aud = payload["aud"];
-    if (typeof aud === "string" || Array.isArray(aud)) return aud as string | string[];
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Returns true if the token's `aud` claim contains the expected audience.
- * Always returns true when EXPECTED_AUDIENCE is not configured.
- */
-function hasExpectedAudience(token: string): boolean {
-  if (!EXPECTED_AUDIENCE) return true;
-  const aud = jwtAudience(token);
-  if (aud === null) return false;
-  return Array.isArray(aud) ? aud.includes(EXPECTED_AUDIENCE) : aud === EXPECTED_AUDIENCE;
-}
-
-/**
- * Accepts either:
- * - UUID (d6df...))
- * - managed reference (managed/primaryAccount/d6df...)
- * and returns managed/primaryAccount/<id>.
- */
-function normalizePrimaryRef(value: unknown): string | null {
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    if (trimmed.startsWith("managed/primaryAccount/")) return trimmed;
-    return `managed/primaryAccount/${trimmed}`;
-  }
-
-  if (!value || typeof value !== "object") return null;
-
-  const rec = value as Record<string, unknown>;
-  if (typeof rec._ref === "string") return normalizePrimaryRef(rec._ref);
-  if (typeof rec.associatedPrimary === "string") return normalizePrimaryRef(rec.associatedPrimary);
-
-  return null;
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -750,7 +672,7 @@ app.post("/mcp", async (req: Request, res: Response) => {
   // Returns HTTP 401 per MCP spec 2025-11-25 §Authentication.
   // Requests with no token are allowed through so that unauthenticated
   // initialize / tools/list (agent discovery) still works.
-  if (token && !hasExpectedAudience(token)) {
+  if (token && !hasExpectedAudienceFor(token, EXPECTED_AUDIENCE)) {
     res.status(401)
       .set("WWW-Authenticate", `Bearer realm="notflux-mcp", error="invalid_token", error_description="Token audience is not valid for this MCP server. Use a Token Exchange token."`)
       .json({ error: "invalid_token", error_description: "Token audience is not valid for this MCP server. Use a Token Exchange token." });
