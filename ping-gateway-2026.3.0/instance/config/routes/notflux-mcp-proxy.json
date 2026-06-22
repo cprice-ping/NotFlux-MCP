@@ -1,6 +1,6 @@
 {
   "name": "notflux-mcp-proxy",
-  "condition": "${find(request.uri.path, '^/mcp')}",
+  "condition": "${find(request.uri.path, '^/mcp(?!/agent-registry)')}",
   "heap": [
     {
       "name": "rsFilter",

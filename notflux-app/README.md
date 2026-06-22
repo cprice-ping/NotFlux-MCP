@@ -42,21 +42,30 @@ NotFlux API behind Kong + PingOne Authorize / AAM
 
 ## Token Exchanges
 
-### Exchange 1: app backend -> MCP token
+### Exchange 1: app backend → gateway token
 
 The backend performs RFC 8693 token exchange before creating the Vertex session:
 
-- input: frontend token presented to `/api/sessions`
-- output: MCP-audience token
+- input: frontend `person_token` presented to `/api/sessions`
+- output: `gateway_token` (`aud=notflux-gateway`, `scope=use_gateway`)
 - storage: session state key `pingone_authorization`
 
-This is what lets the Vertex agent connect to the MCP server with a per-user Bearer token.
+This is what lets the Vertex agent call PingGateway with a per-user Bearer token.
 
-### Exchange 2: MCP server -> Kong token
+### Exchange 2: PingGateway → mcp token (NotFlux path only)
 
-The MCP server performs a second RFC 8693 token exchange on each tool call:
+PingGateway performs RFC 8693 token exchange via `OAuth2TokenExchangeFilter` before forwarding to the NotFlux MCP server:
 
-- input: MCP-audience token from the agent
+- input: `gateway_token` from the agent
+- output: `mcp_token` (`aud=notflux-mcp`, `scope=use_mcp_tools`)
+
+Weather and Agent Registry backends receive an API key instead — no token exchange at this hop.
+
+### Exchange 3: MCP server → Kong token
+
+The NotFlux MCP server performs a third RFC 8693 token exchange on each tool call:
+
+- input: `mcp_token` forwarded by PingGateway
 - output: Kong / NotFlux API token
 - scope: selected **per tool** in the MCP server code, for example `get_media`, `manage_account`, or `manage_profiles`
 

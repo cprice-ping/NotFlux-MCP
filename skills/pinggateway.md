@@ -149,6 +149,59 @@ The filter usually needs supporting heap objects for client authentication, fail
 }
 ```
 
+### API key backend hop pattern
+
+When the backend MCP server authenticates inbound requests using a static API key (e.g. `X-Api-Key` header) instead of a Bearer token, skip `OAuth2TokenExchangeFilter` entirely.
+
+Use a `HeaderFilter` to:
+1. Remove the inbound `Authorization` header (the gateway token must not reach the backend).
+2. Add the backend-specific API key header.
+
+```json
+{
+  "type": "HeaderFilter",
+  "config": {
+    "messageType": "request",
+    "remove": [ "Authorization" ],
+    "add": {
+      "X-Api-Key": [ "${env['BACKEND_MCP_API_KEY']}" ]
+    }
+  }
+}
+```
+
+Store the API key in a Kubernetes Secret alongside the other gateway secrets:
+
+```yaml
+# In the ping-gateway-secrets Secret:
+BACKEND_MCP_API_KEY: "<base64-encoded-key>"
+```
+
+Reference it as an env var in the Deployment:
+
+```yaml
+env:
+  - name: BACKEND_MCP_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: ping-gateway-secrets
+        key: BACKEND_MCP_API_KEY
+```
+
+The backend MCP server must also have its own Secret with the same key value so both sides agree. Store and deploy them separately — do not share a single Secret across gateway and backend deployments unless they are in the same namespace and that coupling is intentional.
+
+Filter chain for API key backend hop (secondary route example):
+
+```
+UriPathRewriteFilter
+  → "rsFilter"
+    → McpValidationFilter
+      → HeaderFilter (remove Authorization, add X-Api-Key)
+        → ReverseProxyHandler
+```
+
+No `TokenExchangeEndpointHandler`, `TokenExchangeClientAuth`, or `TokenExchangeFailureHandler` are needed when the backend uses API key auth.
+
 ### SystemAndEnvSecretStore secret ID naming
 
 With `"format": "PLAIN"`, `SystemAndEnvSecretStore` resolves a `clientSecretId` by uppercasing it and replacing dots with underscores. Use secret IDs that map cleanly to the environment variables available in the container.
@@ -219,6 +272,128 @@ Use one route per backend MCP server with its own:
 Use only if the existing architecture already routes by host and the deployment environment supports it cleanly.
 
 For each MCP server, keep backend identity isolated. Do not reuse the wrong audience or scope across servers.
+
+## Single inbound token for multiple backend routes
+
+The agent only needs one gateway token, regardless of how many backend MCP servers exist behind the gateway. This works because all routes share the same gateway resource ID — the inbound token's `aud` matches that one resource, and any route that validates via the same introspection/resource server config will accept the same token.
+
+### McpProtectionFilter constraint — primary vs. secondary routes
+
+`McpProtectionFilter` does two things at route build time:
+1. Registers a `/.well-known/oauth-protected-resource/<path>` metadata endpoint.
+2. Validates inbound tokens via introspection.
+
+**Only one route per resource path may use `McpProtectionFilter`.** If two routes both use it with the same resource ID path, the second route throws `AlreadyRegisteredException` at startup and fails to load.
+
+Design rule:
+- Designate **one route as the primary route**. It uses `McpProtectionFilter` and owns the well-known registration.
+- All other routes are **secondary routes**. They validate the inbound token using `OAuth2ResourceServerFilter` (heap object named `rsFilter` by convention) directly, without re-registering any well-known endpoint.
+
+This means:
+- one well-known registration covers all routes
+- the agent sends the same token to every route
+- secondary routes validate the token identically to the primary (same introspection endpoint, same scope)
+
+### Primary route condition narrowing
+
+When using path-based split, the primary route's condition must be narrowed to avoid matching secondary route paths. Use a negative lookahead to exclude the secondary paths:
+
+```json
+"condition": "${find(request.uri.path, '^/mcp(?!/weather)')}"
+```
+
+Without this, the primary route's broader condition (e.g. `^/mcp`) will match `/mcp/weather` before the secondary route is evaluated.
+
+### rsFilter heap pattern
+
+Define `rsFilter` as a named heap object in the secondary route's `heap` array:
+
+```json
+{
+  "name": "rsFilter",
+  "type": "OAuth2ResourceServerFilter",
+  "config": {
+    "accessTokenResolver": "RsFilterTokenResolver"
+  }
+}
+```
+
+Supporting heap objects required alongside `rsFilter`:
+
+```json
+{
+  "name": "IntrospectionProviderHandler",
+  "type": "Chain",
+  "config": {
+    "filters": [
+      {
+        "name": "IntrospectionClientAuth",
+        "type": "ClientSecretBasicAuthenticationFilter",
+        "config": {
+          "clientId": "${env['INTROSPECT_CLIENT_ID']}",
+          "clientSecretId": "introspect.client.secret",
+          "secretsProvider": "SecretsStore"
+        }
+      }
+    ],
+    "handler": { "type": "ClientHandler" }
+  }
+},
+{
+  "name": "RsFilterTokenResolver",
+  "type": "TokenIntrospectionAccessTokenResolver",
+  "config": {
+    "endpoint": "&{authorizationServerUri}/introspect",
+    "providerHandler": "IntrospectionProviderHandler",
+    "scopes": [ "&{agentFacingScope}" ]
+  }
+}
+```
+
+Reference `rsFilter` in the secondary route's filter chain as a bare string, not an inline object:
+
+```json
+"filters": [
+  { "name": "PathRewrite", "type": "UriPathRewriteFilter", "config": { ... } },
+  "rsFilter",
+  { "name": "McpValidationFilter", "type": "McpValidationFilter" },
+  ...
+  { "type": "ReverseProxyHandler" }
+]
+```
+
+Using the string `"rsFilter"` (bare heap reference) is required — wrapping it in an inline object would attempt to instantiate a second copy and may re-trigger the registration conflict.
+
+### Secondary route filter chain
+
+Full recommended filter chain for a secondary route (token validation, no well-known registration):
+
+```
+UriPathRewriteFilter (strip the sub-path prefix: /mcp/weather → /mcp)
+  → "rsFilter"                  (validates inbound token via introspection)
+    → PingAuthorizeFilter        (if P1AZ/PAZ is in use — must be before McpValidationFilter)
+      → McpValidationFilter      (validates MCP protocol — consumes body; must run after P1AZ)
+        → [HeaderFilter / TokenExchange] (backend hop auth — see below)
+          → ReverseProxyHandler
+```
+
+**P1AZ on secondary routes**: `PingAuthorizeFilter` must be added to every route that should be policy-governed — it is not inherited from the primary route. A secondary route that omits `PingAuthorizeFilter` will bypass P1AZ entirely even though the primary route is protected. Add the same `PingAuthorizeFilter` + `P1AZDenyHandler` heap objects and filter-chain entry to each secondary route that needs policy enforcement.
+
+The `P1AZDenyHandler` heap object is required in each route that uses `PingAuthorizeFilter`:
+
+```json
+{
+  "name": "P1AZDenyHandler",
+  "type": "StaticResponseHandler",
+  "config": {
+    "status": 403,
+    "headers": { "Content-Type": [ "application/json" ] },
+    "entity": "{\"error\":\"access_denied\",\"error_description\":\"Request denied by policy\"}"
+  }
+}
+```
+
+The `PingAuthorizeFilter` inline config is identical across routes — `gatewayServiceUri`, `secretsProvider`, `gatewayCredentialSecretId`, and `includeBodyContentTypes` are the same values. Only the route position (after `McpValidationFilter`, before the backend hop) differs between primary and secondary routes.
 
 # Localhost deployment rules
 
@@ -357,7 +532,8 @@ If the user wants policy decisions from Authorize:
   "config": {
     "gatewayServiceUri": "&{P1AZ_GATEWAY_SERVICE_URI}",
     "secretsProvider": "SecretsStore",
-    "gatewayCredentialSecretId": "p1az.gateway.credential"
+    "gatewayCredentialSecretId": "p1az.gateway.credential",
+    "includeBodyContentTypes": [ "application/json" ]
   }
 }
 ```
@@ -367,6 +543,47 @@ If the user wants policy decisions from Authorize:
 Other fields (`clientId`, `endpoint` in other heaplets) tolerate `${env['...']}` because their implementations parse the value lazily or as a plain string.
 
 The filter takes the access token from the `Authorization` header by default, which is correct after `McpProtectionFilter` has already validated it.
+
+### includeBodyContentTypes for MCP tool visibility
+
+Without `includeBodyContentTypes`, P1AZ/PAZ only sees the HTTP path and the validated token claims. It has no visibility into what the agent is actually trying to do.
+
+MCP uses JSON-RPC 2.0 over HTTP POST with `Content-Type: application/json`. Setting:
+
+```json
+"includeBodyContentTypes": [ "application/json" ]
+```
+
+causes the full request body to be forwarded to P1AZ/PAZ with each Sideband call. For MCP tool invocations, the body looks like:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "delete_profile",
+    "arguments": { "profile_id": "abc-123" }
+  },
+  "id": 1
+}
+```
+
+This gives P1AZ/PAZ access to:
+- `method` — the JSON-RPC method (`tools/call`, `tools/list`, `initialize`)
+- `params.name` — the specific MCP tool being invoked (e.g. `delete_profile`, `get_media_content`)
+- `params.arguments` — the full tool arguments, enabling attribute-based decisions on resource IDs, scopes, or any argument value the policy cares about
+
+With this, P1AZ/PAZ policies can make decisions like:
+- allow `tools/list` and `initialize` for any authenticated user
+- allow `get_*` tools but deny `delete_*` tools for users without elevated scope
+- allow `delete_profile` only when `params.arguments.profile_id` matches the subject's own profile
+- deny any `tools/call` outside business hours
+
+Without body inclusion, the policy can only evaluate the token claims and the URL path — it cannot distinguish a read tool call from a destructive one.
+
+**Latency tradeoff**: Including the body requires PingGateway to buffer the full request body before forwarding it to the Sideband API, which adds latency proportional to body size. For typical MCP tool calls (small JSON payloads) this is negligible. Do not enable body inclusion on routes where large binary payloads are expected.
+
+**GET requests (SSE stream) have no body** — `includeBodyContentTypes` has no effect on the GET `/mcp` stream endpoint. Only POST requests carry a JSON-RPC body.
 
 For PAZ standalone, replace `gatewayServiceUri` with the PAZ host/port and base path. The `sharedSecretHeaderName` defaults to `CLIENT-TOKEN` and is correct for both P1AZ and PAZ unless a custom header was configured.
 
@@ -384,14 +601,16 @@ For PAZ standalone:
 
 ```
 McpProtectionFilter
-  → McpValidationFilter
-    → PingAuthorizeFilter   ← add here
+  → PingAuthorizeFilter   ← before McpValidationFilter
+    → McpValidationFilter
       → OAuth2TokenExchangeFilter
         → HeaderFilter
           → ReverseProxyHandler
 ```
 
-Always place Authorize decisioning after authentication and MCP validation but before token exchange. This ensures P1AZ/PAZ sees the real validated subject and request, and token exchange only happens for permitted requests.
+**`PingAuthorizeFilter` must run before `McpValidationFilter`**, not after. `McpValidationFilter` reads the request body to validate the JSON-RPC structure, which consumes the body stream. If `PingAuthorizeFilter` runs after it, the body is already exhausted and `includeBodyContentTypes` will forward an empty body to P1AZ — the policy sees no tool name and no arguments.
+
+Placing `PingAuthorizeFilter` before `McpValidationFilter` ensures P1AZ receives the full body. The token has already been validated by `McpProtectionFilter` (or `rsFilter` on secondary routes) at this point, so P1AZ is making decisions on a validated identity with a complete request body.
 
 ### Failure pattern
 
@@ -483,7 +702,9 @@ Pick:
 Pick introspection or stateless validation based on the actual provider and architecture.
 
 ## Step 4: choose backend hop auth
-If backend token exchange is required, use `OAuth2TokenExchangeFilter` unless a hard provider limitation forces a script.
+Determine how the backend MCP server expects to be called:
+- **Bearer token**: use `OAuth2TokenExchangeFilter` to exchange the gateway token for a backend-scoped token. Use a script only if a hard provider limitation prevents the built-in filter.
+- **API key**: skip token exchange entirely. Use `HeaderFilter` to remove `Authorization` and inject the API key (e.g. `X-Api-Key`) from an env var backed by a Kubernetes Secret. Do not perform token exchange when the backend uses static key auth.
 
 ## Step 5: choose backend target
 - Docker localhost: use the local container/service target

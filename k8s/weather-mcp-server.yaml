@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: weather-mcp-secrets
+  namespace: ping-devops-cprice
+type: Opaque
+stringData:
+  # Shared secret between PingGateway and the weather MCP server.
+  # Must match WEATHER_MCP_API_KEY in the ping-gateway-secrets Secret.
+  WEATHER_API_KEY: "42ad0307-9fe7-4d52-861b-7bc139017ab1"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weather-mcp-server
+  namespace: ping-devops-cprice
+  labels:
+    app: weather-mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: weather-mcp-server
+  template:
+    metadata:
+      labels:
+        app: weather-mcp-server
+    spec:
+      containers:
+        - name: weather-mcp-server
+          image: docker.io/pricecs/weather-mcp-server:latest
+          ports:
+            - containerPort: 3150
+          env:
+            - name: PORT
+              value: "3150"
+            - name: WEATHER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: weather-mcp-secrets
+                  key: WEATHER_API_KEY
+            # Public URL is the gateway-facing path so resource metadata is correct
+            - name: PUBLIC_URL
+              value: "https://notflux-gateway.ping-devops.com/mcp/weather"
+            # No direct browser origins — only PingGateway reaches this server
+            - name: ALLOWED_ORIGINS
+              value: ""
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3150
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3150
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+---
+# ClusterIP only — no public Ingress; only reachable from within the cluster (PingGateway)
+apiVersion: v1
+kind: Service
+metadata:
+  name: weather-mcp-server
+  namespace: ping-devops-cprice
+spec:
+  selector:
+    app: weather-mcp-server
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3150
+  type: ClusterIP

@@ -1,0 +1,4 @@
+# pnpm 11+ project config (replaces the "pnpm" field in package.json)
+# onlyBuiltDependencies was removed in pnpm v11; use allowBuilds instead
+allowBuilds:
+  esbuild: true
