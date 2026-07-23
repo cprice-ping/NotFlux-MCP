@@ -86,6 +86,67 @@ _PINGONE_MCP_SCOPE      = os.getenv('PINGONE_MCP_SCOPE', '')
 # Simple in-process token cache: stripped_agent_token → (mcp_token, expires_at)
 _mcp_token_cache: dict[str, tuple[str, float]] = {}
 
+# ---------------------------------------------------------------------------
+# GCP Workload Identity / SPIFFE token inspector
+# Fetches the OIDC identity token from the GCP metadata server and logs its
+# decoded payload once per process so you can see the claims (sub, email,
+# google.compute_engine.*, etc.) without sending it anywhere yet.
+# ---------------------------------------------------------------------------
+_workload_identity_logged = False
+
+
+def _log_workload_identity_once() -> None:
+    """Fetch and log the GCP OIDC identity token payload (once per process).
+
+    The token is fetched with the PingOne token endpoint as the audience —
+    that is the eventual Exchange 3 target so the aud claim will match.
+    Falls back to 'https://iam.googleapis.com' if PINGONE_ENV_ID is unset.
+
+    This is read-only inspection only; the token is NOT sent to PingOne yet.
+    """
+    global _workload_identity_logged
+    if _workload_identity_logged:
+        return
+    _workload_identity_logged = True
+
+    # Use the eventual PingOne audience so the aud claim is meaningful.
+    audience = (
+        f'https://auth.pingone.com/{_PINGONE_ENV_ID}/as/token'
+        if _PINGONE_ENV_ID
+        else 'https://iam.googleapis.com'
+    )
+
+    try:
+        resp = http_requests.get(
+            'http://metadata.google.internal/computeMetadata/v1/instance'
+            '/service-accounts/default/identity',
+            params={'audience': audience, 'format': 'full'},
+            headers={'Metadata-Flavor': 'Google'},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        token = resp.text.strip()
+
+        # Decode JWT payload — no signature verification, inspection only.
+        parts = token.split('.')
+        if len(parts) >= 2:
+            padded = parts[1] + '=' * (-len(parts[1]) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(padded).decode())
+            logging.info(
+                'workload_identity: JWT payload (audience=%s):\n%s',
+                audience,
+                json.dumps(payload, indent=2),
+            )
+            # Log the raw token separately so it can be decoded externally too.
+            logging.info('workload_identity: raw token (first 80 chars): %s…', token[:80])
+        else:
+            logging.warning('workload_identity: unexpected token format: %s', token[:120])
+
+    except http_requests.exceptions.ConnectionError:
+        logging.info('workload_identity: metadata server not reachable (local dev)')
+    except Exception as exc:
+        logging.warning('workload_identity: failed to fetch identity token — %s', exc)
+
 
 def _get_vertex_agent_id() -> str:
     """Return the Vertex Agent Engine resource path for use as a custom claim.
@@ -205,6 +266,11 @@ def inject_mcp_auth(callback_context: CallbackContext) -> Optional[types.Content
     if not auth:
         # No token in session state — MCP tools not available this turn.
         return None
+
+    # Only log the workload identity on real user turns (not on the Vertex
+    # post-startup validation query, which has no session state and a short
+    # timeout — making an HTTP call there caused deployment failures).
+    _log_workload_identity_once()
 
     # Strip "Bearer " prefix before using as subject_token in the exchange.
     agent_token = auth.removeprefix('Bearer ').strip()
