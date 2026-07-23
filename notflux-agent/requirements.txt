@@ -6,7 +6,7 @@
 #
 # google-adk is required because root_agent is a google.adk LlmAgent (the runtime
 # cannot unpickle it otherwise); [mcp] pulls the `mcp` package agent.py imports.
-google-cloud-aiplatform[adk,reasoningengine]==1.152.0
+google-cloud-aiplatform[adk,reasoningengine]==1.162.0
 google-adk[mcp]==2.5.0
 google-genai==2.14.0
 pydantic==2.13.4

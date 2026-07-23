@@ -56,16 +56,20 @@ REQUIREMENTS = [
     # version in the local venv that ran deploy.py (see `pip freeze`).
     #
     #   - google-cloud-aiplatform provides vertexai.agent_engines.templates.adk,
-    #     the AdkApp class the pickle is an instance of. Local is 1.152.0; leaving
-    #     it unpinned let the runtime install 1.162.0 — THAT skew was the crash.
+    #     the AdkApp class the pickle is an instance of, so its version must match
+    #     the LOCAL venv that ran deploy.py — otherwise the runtime can't unpickle.
+    #     Pinned to 1.162.0 (NOT 1.152.0): aiplatform 1.152.0 declares google-genai
+    #     <2.0.0, which conflicts with google-adk 2.5.0's genai 2.x and makes the
+    #     runtime pip resolve fail (ResolutionImpossible). 1.162.0 allows genai<3.0.
+    #     IMPORTANT: keep your local aiplatform at 1.162.0 too and re-run deploy.py
+    #     so the pickle is created with the same version the runtime installs.
     #     The [adk,reasoningengine] extras are required (they pull the serving deps).
     #   - google-adk is NON-NEGOTIABLE: root_agent is a google.adk LlmAgent, so the
     #     runtime literally cannot unpickle the agent without ADK installed. The
     #     [mcp] extra pulls the `mcp` package that agent.py's McpToolset imports.
-    #   - google-genai is pinned too: the agent/pickle reference genai types, and
-    #     2.x vs 1.x is a breaking major bump. Local is already 2.14.0, so this just
-    #     locks the runtime to match (it was never the <2.0.0 issue we first guessed).
-    'google-cloud-aiplatform[adk,reasoningengine]==1.152.0',
+    #   - google-genai 2.14.0 satisfies aiplatform 1.162.0 (<3.0.0) and google-adk
+    #     2.5.0; it's the version already in the local venv.
+    'google-cloud-aiplatform[adk,reasoningengine]==1.162.0',
     'google-adk[mcp]==2.5.0',
     'google-genai==2.14.0',
     'pydantic==2.13.4',
