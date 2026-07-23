@@ -218,7 +218,7 @@ def inject_mcp_auth(callback_context: CallbackContext) -> Optional[types.Content
         logging.error(f'inject_mcp_auth: exchange failed — {exc}. MCP tools unavailable this turn.')
         return None
 
-    agent = callback_context._invocation_context.agent
+    agent = callback_context.get_invocation_context().agent
     non_mcp = [t for t in agent.tools if not isinstance(t, McpToolset)]
     agent.tools = non_mcp + [
         McpToolset(

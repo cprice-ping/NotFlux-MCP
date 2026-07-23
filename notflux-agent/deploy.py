@@ -40,10 +40,17 @@ PROJECT_ID = 'cprice---agentic-demos'
 LOCATION = 'us-west1'
 STAGING_BUCKET = 'gs://notflux-agent-staging'  # must exist in the project
 
+# NOTE: agent.py imports McpToolset from google.adk.tools.mcp_tool, which needs
+# the `mcp` package. That package is ONLY pulled in by the google-adk[mcp] extra
+# — neither plain `google-adk` nor aiplatform's [adk] extra installs it. If it is
+# missing from this list, the Agent Engine container installs an ADK without mcp,
+# `import agent` raises ModuleNotFoundError at startup, and create() fails with
+# "Reasoning Engine ... failed to start and cannot serve traffic". So the [mcp]
+# extra here is load-bearing, not cosmetic.
 REQUIREMENTS = [
     'google-cloud-aiplatform[adk,reasoningengine]',
-    'google-adk>=0.4.0',
-    'requests>=2.32.0',    # Exchange 2: agent_token -> mcp_token via PingOne
+    'google-adk[mcp]>=1.5.0',   # [mcp] extra installs the `mcp` package agent.py imports
+    'requests>=2.32.0',         # Exchange 2: agent_token -> mcp_token via PingOne
 ]
 
 # ---------------------------------------------------------------------------
