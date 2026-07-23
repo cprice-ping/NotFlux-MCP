@@ -48,9 +48,18 @@ STAGING_BUCKET = 'gs://notflux-agent-staging'  # must exist in the project
 # "Reasoning Engine ... failed to start and cannot serve traffic". So the [mcp]
 # extra here is load-bearing, not cosmetic.
 REQUIREMENTS = [
-    'google-cloud-aiplatform[adk,reasoningengine]',
-    'google-adk[mcp]>=1.5.0',   # [mcp] extra installs the `mcp` package agent.py imports
-    'requests>=2.32.0',         # Exchange 2: agent_token -> mcp_token via PingOne
+    # The pickle references vertexai.agent_engines.templates.adk (from AdkApp).
+    # The runtime venv is isolated — vertexai is NOT inherited from the base image.
+    # We must install google-cloud-aiplatform into the venv so the pickle loads.
+    #
+    # Pin to 1.152.0 (the version that created the pickle) because:
+    #   - It has vertexai.agent_engines.templates.adk  ✓
+    #   - It constrains google-genai<2.0.0, which prevents a major-version
+    #     upgrade that otherwise crashes the entrypoint before uvicorn starts  ✓
+    'google-cloud-aiplatform==1.152.0',
+    'pydantic',
+    'cloudpickle',
+    'requests>=2.32.0',    # Exchange 2: agent_token -> mcp_token via PingOne
 ]
 
 # ---------------------------------------------------------------------------
@@ -105,14 +114,32 @@ def update_agent(resource_id: str) -> AgentEngine:
     return engine
 
 
+def recreate_agent(resource_id: str) -> AgentEngine:
+    """Delete an existing engine and create a fresh one.
+
+    Use this when the existing engine was created via Agent Studio
+    (spec.deployment_source) and cannot be updated with spec.package_spec.
+    The new engine will have a different resource ID — update
+    VERTEX_AGENT_RESOURCE in notflux-app/backend/.env accordingly.
+    """
+    vertexai.init(project=PROJECT_ID, location=LOCATION, staging_bucket=STAGING_BUCKET)
+    print(f'Deleting engine {resource_id} …')
+    AgentEngine(resource_id).delete(force=True)
+    print('Deleted. Creating replacement …')
+    return create_agent()
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Deploy NotFlux agent to Vertex AI Agent Engine')
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--create', action='store_true', help='Create a new agent')
     group.add_argument('--update', metavar='RESOURCE_ID', help='Update existing agent by resource ID')
+    group.add_argument('--recreate', metavar='RESOURCE_ID', help='Delete existing agent and create a fresh one (use when switching from Studio deployment)')
     args = parser.parse_args()
 
     if args.create:
         create_agent()
+    elif args.recreate:
+        recreate_agent(args.recreate)
     else:
         update_agent(args.update)
