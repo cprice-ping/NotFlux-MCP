@@ -48,17 +48,28 @@ STAGING_BUCKET = 'gs://notflux-agent-staging'  # must exist in the project
 # "Reasoning Engine ... failed to start and cannot serve traffic". So the [mcp]
 # extra here is load-bearing, not cosmetic.
 REQUIREMENTS = [
-    # The pickle references vertexai.agent_engines.templates.adk (from AdkApp).
-    # The runtime venv is isolated — vertexai is NOT inherited from the base image.
-    # We must install google-cloud-aiplatform into the venv so the pickle loads.
+    # Agent Engine loads code.pkl inside an isolated runtime venv. cloudpickle is
+    # version-sensitive: if the runtime installs a NEWER build of any library that
+    # a pickled object depends on than the one that CREATED the pickle, the load
+    # crashes before uvicorn starts — the engine "failed to start and cannot serve
+    # traffic" with no serving logs. So every dependency here is pinned to the exact
+    # version in the local venv that ran deploy.py (see `pip freeze`).
     #
-    # Pin to 1.152.0 (the version that created the pickle) because:
-    #   - It has vertexai.agent_engines.templates.adk  ✓
-    #   - It constrains google-genai<2.0.0, which prevents a major-version
-    #     upgrade that otherwise crashes the entrypoint before uvicorn starts  ✓
-    'google-cloud-aiplatform==1.152.0',
-    'pydantic',
-    'cloudpickle',
+    #   - google-cloud-aiplatform provides vertexai.agent_engines.templates.adk,
+    #     the AdkApp class the pickle is an instance of. Local is 1.152.0; leaving
+    #     it unpinned let the runtime install 1.162.0 — THAT skew was the crash.
+    #     The [adk,reasoningengine] extras are required (they pull the serving deps).
+    #   - google-adk is NON-NEGOTIABLE: root_agent is a google.adk LlmAgent, so the
+    #     runtime literally cannot unpickle the agent without ADK installed. The
+    #     [mcp] extra pulls the `mcp` package that agent.py's McpToolset imports.
+    #   - google-genai is pinned too: the agent/pickle reference genai types, and
+    #     2.x vs 1.x is a breaking major bump. Local is already 2.14.0, so this just
+    #     locks the runtime to match (it was never the <2.0.0 issue we first guessed).
+    'google-cloud-aiplatform[adk,reasoningengine]==1.152.0',
+    'google-adk[mcp]==2.5.0',
+    'google-genai==2.14.0',
+    'pydantic==2.13.4',
+    'cloudpickle==3.1.2',
     'requests>=2.32.0',    # Exchange 2: agent_token -> mcp_token via PingOne
 ]
 

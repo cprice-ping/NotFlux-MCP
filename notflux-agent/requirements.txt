@@ -1,6 +1,14 @@
-google-cloud-aiplatform[adk,reasoningengine]>=1.87.0
-# [mcp] extra installs the `mcp` package that agent.py's McpToolset imports.
-# Plain `google-adk` does NOT include it — omitting the extra makes the deployed
-# Agent Engine container crash on startup with ModuleNotFoundError: No module named 'mcp'.
-google-adk[mcp]>=1.5.0
+# Pinned to the versions Agent Engine needs at runtime to unpickle and serve the
+# deployed app. These MUST match the versions used to create the pickle (deploy.py
+# REQUIREMENTS mirrors this list). cloudpickle is version-sensitive — a newer
+# library in the runtime than the one that pickled the app crashes startup before
+# uvicorn ("failed to start and cannot serve traffic", no serving logs).
+#
+# google-adk is required because root_agent is a google.adk LlmAgent (the runtime
+# cannot unpickle it otherwise); [mcp] pulls the `mcp` package agent.py imports.
+google-cloud-aiplatform[adk,reasoningengine]==1.152.0
+google-adk[mcp]==2.5.0
+google-genai==2.14.0
+pydantic==2.13.4
+cloudpickle==3.1.2
 requests>=2.32.0
