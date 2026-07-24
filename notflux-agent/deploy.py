@@ -3,7 +3,16 @@
 Uses ADK directly — not Agent Studio — so we can attach before_agent_callback
 to inject per-session MCP auth headers from Vertex session state.
 
+RUNTIME PYTHON VERSION — IMPORTANT:
+    Deploy from a Python 3.12 (or 3.13) venv. Agent Engine builds a runtime image
+    matching your local Python minor version; the 3.14 image (assembly-service-py314)
+    is too new and a provably-working app fails to boot in it — the engine reports
+    "failed to start and cannot serve traffic" with NO serving logs. The app itself
+    is fine (verify locally with test_roundtrip.py); it is the py314 runtime that
+    won't run it. Build on 3.12 and the deploy succeeds.
+
 Prerequisites:
+    python3.12 -m venv .venv && source .venv/bin/activate   # NOT 3.14
     pip install -r requirements.txt
     gcloud auth application-default login
 
