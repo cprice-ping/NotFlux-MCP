@@ -104,6 +104,43 @@ AGENT_ENV_VARS = {
     # GOOGLE_CLOUD_LOCATION, which GCP does set in the managed runtime.
 }
 
+# ---------------------------------------------------------------------------
+# Agent runtime identity (the Agent Identifier for PingOne 3rd-party exchange).
+#
+# When SERVICE_ACCOUNT is set, the engine RUNS AS that user-managed service
+# account, so the OIDC identity token from the metadata server carries THAT
+# account's email/sub — a persistent, per-agent identity you control. When it
+# is empty, the engine runs as Google's shared, project-level Agent Engine
+# service agent (service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re...), which is
+# identical for every engine in the project and cannot distinguish one agent
+# from another.
+#
+# Set AGENT_SERVICE_ACCOUNT per agent (e.g. notflux-agent@..., pingfed-agent@...)
+# so each deployment presents its own stable identifier. The identity is stable
+# across --update AND --create (it is your SA, not tied to the engine's ID).
+#
+# PREREQUISITES for a custom SA (deploy fails without them):
+#   1. The SA exists in this project.
+#   2. The Agent Engine service agent can impersonate it — grant the SA:
+#        gcloud iam service-accounts add-iam-policy-binding <SA_EMAIL> \
+#          --member="serviceAccount:service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com" \
+#          --role="roles/iam.serviceAccountUser"
+#   3. The SA has the perms the agent needs at runtime (e.g. roles/aiplatform.user
+#      for the Gemini model call).
+# ---------------------------------------------------------------------------
+SERVICE_ACCOUNT = os.getenv('AGENT_SERVICE_ACCOUNT', '').strip()
+
+
+def _identity_kwargs() -> dict:
+    """Pass service_account only when set — omit it entirely otherwise, so the
+    engine falls back to the managed default SA rather than being handed ''."""
+    if SERVICE_ACCOUNT:
+        print(f'Runtime identity (Agent Identifier): {SERVICE_ACCOUNT}')
+        return {'service_account': SERVICE_ACCOUNT}
+    print('Runtime identity: managed default Agent Engine service agent '
+          '(project-scoped; set AGENT_SERVICE_ACCOUNT for a per-agent identity)')
+    return {}
+
 
 def create_agent() -> AgentEngine:
     vertexai.init(project=PROJECT_ID, location=LOCATION, staging_bucket=STAGING_BUCKET)
@@ -115,6 +152,7 @@ def create_agent() -> AgentEngine:
         display_name='NotFlux',
         description='NotFlux AI assistant with PingOne Token Exchange for MCP access',
         env_vars=AGENT_ENV_VARS,
+        **_identity_kwargs(),
     )
     resource_id = engine.resource_name.split('/')[-1]
     print(f'Created: {engine.resource_name}')
@@ -133,6 +171,7 @@ def update_agent(resource_id: str) -> AgentEngine:
         requirements=REQUIREMENTS,
         extra_packages=['agent.py'],
         env_vars=AGENT_ENV_VARS,
+        **_identity_kwargs(),
     )
     print(f'Updated: {engine.resource_name}')
     return engine
