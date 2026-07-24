@@ -206,8 +206,20 @@ What differs between the two deployments — all env, no code:
   `PINGONE_CLIENT_ID` / `PINGONE_CLIENT_SECRET` / `PINGONE_AGENT_AUDIENCE` /
   `PINGONE_MCP_SCOPE` (the names are historical — they're just "the Exchange 2
   client" for whichever endpoint you point at).
+- **Actor-token delegation:** set `SEND_ACTOR_TOKEN=true` so Exchange 2 attaches
+  the GCP workload-identity token as the `actor_token` (the agent's SA → `act.sub`
+  in the issued token) alongside the subject (the P1 agent token carrying the
+  human). PingOne rejects an actor token, so this stays off for the P1 agent. The
+  actor token is typed `...:jwt` by default (what PF expects) and is minted with
+  its `aud` = `TOKEN_EXCHANGE_ENDPOINT` (i.e. PF); override with `ACTOR_TOKEN_TYPE`
+  / `ACTOR_TOKEN_AUDIENCE` if your PF policy wants different values. The issued
+  token comes out looking like the PingOne TE-2 result — same `use_gateway` scope
+  and gateway `aud` — just from the PF issuer, with `act.sub` from the Google
+  token. So the gateway only needs PF added as a trusted issuer; the rest of its
+  handling is unchanged.
 - **Identity:** a **distinct** service account (e.g. `pingfed-agent@…`) via
-  `AGENT_SERVICE_ACCOUNT`, so PingFed sees its own stable Agent Identifier.
+  `AGENT_SERVICE_ACCOUNT`, so PingFed sees its own stable Agent Identifier — this
+  is the SA whose token becomes the actor assertion above.
 - **Display name:** change `display_name='NotFlux'` in `create_agent()` so the two
   engines are distinguishable in the console.
 - **Gateway:** unchanged — same `MCP_URL`, since PingGateway fronts both.
