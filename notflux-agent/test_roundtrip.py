@@ -10,13 +10,15 @@ Run:
     python test_roundtrip.py
 """
 
+import os
+
 import cloudpickle
 import vertexai
 from vertexai.agent_engines import AdkApp
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(os.getenv('ENV_FILE') or '.env')  # ENV_FILE=.env.pingfed to test that config
 except ImportError:
     pass
 

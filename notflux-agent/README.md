@@ -177,23 +177,60 @@ cloud failure — if it's green locally, the fault is environmental.
 
 ---
 
-## Forking for a different provider (e.g. PingFed + LiteLLM)
+## A second agent for a different IdP (e.g. PingFed)
 
-To stand up a parallel agent against a different token provider or gateway,
-nothing structural changes — only configuration:
+If the gateway (PingGateway) accepts tokens from more than one IdP on the same
+routes, you do **not** need a fork or a second gateway. Deploy this same code a
+second time with a different `.env`; the two agents share the PingGateway routes
+and differ only in configuration. Switching which one notflux-app targets stays a
+single `VERTEX_AGENT_RESOURCE` change in the backend `.env`.
 
-- **Token provider (PingOne → PingFed):** the exchange logic in `agent.py`
-  targets a `.../as/token` endpoint and reads `PINGONE_*` env vars. Point these
-  at the PingFed issuer/client (and adjust the endpoint path in
-  `_exchange_for_mcp_token` / `_log_workload_identity_once` if PingFed's token URL
-  differs). Give the fork its own env var names if you want both live at once.
-- **Gateway (PingGateway → LiteLLM):** set `MCP_URL` to the LiteLLM gateway
-  endpoint. No code change needed if the gateway still fronts an MCP server.
-- **Identity:** create a **distinct** service account (e.g. `pingfed-agent@…`) and
-  set `AGENT_SERVICE_ACCOUNT` to it, so PingFed sees its own stable Agent
-  Identifier — separate from the NotFlux/PingOne agent.
+Both env files live in this one folder — no copying. `deploy.py` and the test
+probes load `.env` by default, or the file named by `ENV_FILE`:
+
+```bash
+# keep .env (PingOne) and .env.pingfed side by side; pick one per command:
+ENV_FILE=.env.pingfed python test_roundtrip.py   # verify locally
+ENV_FILE=.env.pingfed python deploy.py --create  # deploy the PingFed agent
+```
+
+`.env.*` is gitignored (except `.env.example`), so secrets stay local. Real shell
+env vars still win over the file, so you can also override a single value inline.
+
+What differs between the two deployments — all env, no code:
+
+- **Token endpoint:** set `TOKEN_EXCHANGE_ENDPOINT=https://<pingfed-host>/as/token`.
+  Blank keeps the PingOne default. `agent.py` uses this for both Exchange 2 and
+  the workload-identity audience.
+- **Exchange 2 client / audience / scope:** put the PingFed client and values in
+  `PINGONE_CLIENT_ID` / `PINGONE_CLIENT_SECRET` / `PINGONE_AGENT_AUDIENCE` /
+  `PINGONE_MCP_SCOPE` (the names are historical — they're just "the Exchange 2
+  client" for whichever endpoint you point at).
+- **Actor-token delegation:** set `SEND_ACTOR_TOKEN=true` so Exchange 2 attaches
+  the GCP workload-identity token as the `actor_token` (the agent's SA → `act.sub`
+  in the issued token) alongside the subject (the P1 agent token carrying the
+  human). PingOne rejects an actor token, so this stays off for the P1 agent. The
+  actor token is typed `...:jwt` by default (what PF expects) and is minted with
+  its `aud` = `TOKEN_EXCHANGE_ENDPOINT` (i.e. PF); override with `ACTOR_TOKEN_TYPE`
+  / `ACTOR_TOKEN_AUDIENCE` if your PF policy wants different values. The issued
+  token comes out looking like the PingOne TE-2 result — same `use_gateway` scope
+  and gateway `aud` — just from the PF issuer, with `act.sub` from the Google
+  token. So the gateway only needs PF added as a trusted issuer; the rest of its
+  handling is unchanged.
+- **Identity:** a **distinct** service account (e.g. `pingfed-agent@…`) via
+  `AGENT_SERVICE_ACCOUNT`, so PingFed sees its own stable Agent Identifier — this
+  is the SA whose token becomes the actor assertion above.
 - **Display name:** change `display_name='NotFlux'` in `create_agent()` so the two
   engines are distinguishable in the console.
+- **Gateway:** unchanged — same `MCP_URL`, since PingGateway fronts both.
 
-Both agents can run in the same project simultaneously; the per-agent service
-account is what keeps their identities distinct.
+Both agents run in the same project simultaneously; the per-agent service account
+keeps their identities distinct.
+
+> **Verify PingFed's exchange request shape.** `TOKEN_EXCHANGE_ENDPOINT` fixes the
+> URL, but the RFC 8693 request body in `_exchange_for_mcp_token` is written for
+> PingOne: `client_secret_basic` auth, a `scope` parameter, and a custom `agent_id`
+> claim. PingFed may expect `resource`/`audience` instead of `scope`, a different
+> client-auth method, or may not accept the `agent_id` param. Confirm against
+> PingFed's token-exchange policy and adjust the payload if needed — that is the
+> one spot that may still need a code tweak.

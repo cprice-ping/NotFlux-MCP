@@ -83,6 +83,36 @@ _PINGONE_AGENT_AUDIENCE = os.getenv('PINGONE_AGENT_AUDIENCE', '')
 # Scope to request in Exchange 2 — PingOne maps this to the MCP resource server aud
 _PINGONE_MCP_SCOPE      = os.getenv('PINGONE_MCP_SCOPE', '')
 
+# Exchange 2 token endpoint. Defaults to the PingOne environment's endpoint for
+# backward compatibility; set TOKEN_EXCHANGE_ENDPOINT to point Exchange 2 at a
+# different provider (e.g. PingFed) with NO code change. This is what lets a
+# second NotFlux agent serve the same PingGateway routes with a different IdP —
+# only the endpoint, client creds, audience/scope, service account, and display
+# name differ between the two deployments. (PINGONE_CLIENT_ID/SECRET/SCOPE are the
+# Exchange 2 client regardless of provider; the name is historical.)
+_TOKEN_ENDPOINT = os.getenv('TOKEN_EXCHANGE_ENDPOINT', '').strip() or (
+    f'https://auth.pingone.com/{_PINGONE_ENV_ID}/as/token' if _PINGONE_ENV_ID else ''
+)
+
+# Actor-token delegation for Exchange 2 (RFC 8693). PingOne does NOT accept an
+# actor token, so this is OFF by default and the PingOne agent is unaffected. For
+# a PingFed agent, set SEND_ACTOR_TOKEN=true: Exchange 2 then attaches the GCP
+# workload-identity token as `actor_token`, so the party acting (this agent's
+# service account) is asserted alongside the subject (the P1 agent token carrying
+# the human). PF stamps it into the issued token as act.sub.
+_SEND_ACTOR_TOKEN  = os.getenv('SEND_ACTOR_TOKEN', '').strip().lower() in ('1', 'true', 'yes')
+# Token-type URI for the Google OIDC identity token used as the actor assertion.
+# Defaults to ...:jwt, which is what PingFed's token-exchange policy expects.
+_ACTOR_TOKEN_TYPE  = os.getenv('ACTOR_TOKEN_TYPE', 'urn:ietf:params:oauth:token-type:jwt').strip()
+# Audience minted into the Google actor token (its `aud` claim) — this is the
+# claim that matters: it must name the provider that validates it (PingFed).
+# Defaults to the token-exchange endpoint; override if PF expects a specific value.
+_ACTOR_TOKEN_AUDIENCE = os.getenv('ACTOR_TOKEN_AUDIENCE', '').strip()
+# Optional: pin the ISSUED token's aud via audience/resource rather than scope.
+# Often unnecessary — the provider's policy sets the issued aud (PF does).
+_EXCHANGE_AUDIENCE = os.getenv('EXCHANGE_AUDIENCE', '').strip()
+_EXCHANGE_RESOURCE = os.getenv('EXCHANGE_RESOURCE', '').strip()
+
 # Simple in-process token cache: stripped_agent_token → (mcp_token, expires_at)
 _mcp_token_cache: dict[str, tuple[str, float]] = {}
 
@@ -95,27 +125,13 @@ _mcp_token_cache: dict[str, tuple[str, float]] = {}
 _workload_identity_logged = False
 
 
-def _log_workload_identity_once() -> None:
-    """Fetch and log the GCP OIDC identity token payload (once per process).
+def _fetch_google_identity_token(audience: str) -> Optional[str]:
+    """Fetch the runtime's GCP OIDC identity token from the metadata server.
 
-    The token is fetched with the PingOne token endpoint as the audience —
-    that is the eventual Exchange 3 target so the aud claim will match.
-    Falls back to 'https://iam.googleapis.com' if PINGONE_ENV_ID is unset.
-
-    This is read-only inspection only; the token is NOT sent to PingOne yet.
+    The token's `aud` is set to `audience` — use the token-exchange endpoint so
+    the provider that validates it (PingFed) sees itself as the audience. Returns
+    None when the metadata server is unreachable (e.g. local dev).
     """
-    global _workload_identity_logged
-    if _workload_identity_logged:
-        return
-    _workload_identity_logged = True
-
-    # Use the eventual PingOne audience so the aud claim is meaningful.
-    audience = (
-        f'https://auth.pingone.com/{_PINGONE_ENV_ID}/as/token'
-        if _PINGONE_ENV_ID
-        else 'https://iam.googleapis.com'
-    )
-
     try:
         resp = http_requests.get(
             'http://metadata.google.internal/computeMetadata/v1/instance'
@@ -125,27 +141,44 @@ def _log_workload_identity_once() -> None:
             timeout=5,
         )
         resp.raise_for_status()
-        token = resp.text.strip()
-
-        # Decode JWT payload — no signature verification, inspection only.
-        parts = token.split('.')
-        if len(parts) >= 2:
-            padded = parts[1] + '=' * (-len(parts[1]) % 4)
-            payload = json.loads(base64.urlsafe_b64decode(padded).decode())
-            logging.info(
-                'workload_identity: JWT payload (audience=%s):\n%s',
-                audience,
-                json.dumps(payload, indent=2),
-            )
-            # Log the raw token separately so it can be decoded externally too.
-            logging.info('workload_identity: raw token (first 80 chars): %s…', token[:80])
-        else:
-            logging.warning('workload_identity: unexpected token format: %s', token[:120])
-
+        return resp.text.strip()
     except http_requests.exceptions.ConnectionError:
         logging.info('workload_identity: metadata server not reachable (local dev)')
     except Exception as exc:
         logging.warning('workload_identity: failed to fetch identity token — %s', exc)
+    return None
+
+
+def _log_workload_identity_once() -> None:
+    """Fetch and log the GCP OIDC identity token payload (once per process).
+
+    The token is fetched with the token-exchange endpoint as the audience — the
+    party that will validate it — so the aud claim is meaningful.
+    Falls back to 'https://iam.googleapis.com' when no endpoint is configured.
+    """
+    global _workload_identity_logged
+    if _workload_identity_logged:
+        return
+    _workload_identity_logged = True
+
+    audience = _TOKEN_ENDPOINT or 'https://iam.googleapis.com'
+    token = _fetch_google_identity_token(audience)
+    if not token:
+        return
+
+    # Decode JWT payload — no signature verification, inspection only.
+    parts = token.split('.')
+    if len(parts) >= 2:
+        padded = parts[1] + '=' * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded).decode())
+        logging.info(
+            'workload_identity: JWT payload (audience=%s):\n%s',
+            audience,
+            json.dumps(payload, indent=2),
+        )
+        logging.info('workload_identity: raw token (first 80 chars): %s…', token[:80])
+    else:
+        logging.warning('workload_identity: unexpected token format: %s', token[:120])
 
 
 def _get_vertex_agent_id() -> str:
@@ -178,8 +211,8 @@ def _exchange_for_mcp_token(agent_token: str) -> str:
     Falls back to returning the original token when PingOne env vars are unset
     (useful for local dev or before P1 is wired up).
     """
-    if not all([_PINGONE_ENV_ID, _PINGONE_CLIENT_ID, _PINGONE_CLIENT_SECRET, _PINGONE_MCP_SCOPE]):
-        logging.warning('exchange_for_mcp: PingOne env vars not configured — using agent token directly')
+    if not all([_TOKEN_ENDPOINT, _PINGONE_CLIENT_ID, _PINGONE_CLIENT_SECRET, _PINGONE_MCP_SCOPE]):
+        logging.warning('exchange_for_mcp: token-exchange env vars not configured — using agent token directly')
         return agent_token
 
     # Validate that the token from session state was issued for this agent.
@@ -210,7 +243,7 @@ def _exchange_for_mcp_token(agent_token: str) -> str:
         return cached[0]
 
     agent_id  = _get_vertex_agent_id()
-    token_url = f'https://auth.pingone.com/{_PINGONE_ENV_ID}/as/token'
+    token_url = _TOKEN_ENDPOINT
 
     # client_secret_basic — credentials in Authorization header (same as backend)
     basic_cred = base64.b64encode(
@@ -230,7 +263,26 @@ def _exchange_for_mcp_token(agent_token: str) -> str:
     if agent_id:
         payload['agent_id'] = agent_id
 
-    logging.info(f'exchange_for_mcp: POST {token_url} agent_id={agent_id or "(none)"}')
+    # Delegation: attach the GCP workload-identity token as the actor assertion
+    # (the party acting = this agent's service account). PingOne rejects this, so
+    # it is gated behind SEND_ACTOR_TOKEN and only used for the PingFed exchange.
+    if _SEND_ACTOR_TOKEN:
+        actor_token = _fetch_google_identity_token(_ACTOR_TOKEN_AUDIENCE or _TOKEN_ENDPOINT)
+        if not actor_token:
+            raise RuntimeError('exchange_for_mcp: SEND_ACTOR_TOKEN set but no workload-identity token available')
+        payload['actor_token']      = actor_token
+        payload['actor_token_type'] = _ACTOR_TOKEN_TYPE
+
+    # Some providers pin the issued token's aud via audience/resource, not scope.
+    if _EXCHANGE_AUDIENCE:
+        payload['audience'] = _EXCHANGE_AUDIENCE
+    if _EXCHANGE_RESOURCE:
+        payload['resource'] = _EXCHANGE_RESOURCE
+
+    logging.info(
+        f'exchange_for_mcp: POST {token_url} agent_id={agent_id or "(none)"} '
+        f'actor_token={"yes" if _SEND_ACTOR_TOKEN else "no"}'
+    )
     resp = http_requests.post(
         token_url,
         data=payload,

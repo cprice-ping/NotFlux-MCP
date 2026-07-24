@@ -34,7 +34,11 @@ from vertexai.agent_engines import AgentEngine, AdkApp
 # Values can also be exported in the shell before running this script.
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    # Select which env file to load with ENV_FILE, so multiple agents (e.g.
+    # PingOne vs PingFed) live in ONE folder as .env, .env.pingfed, etc.:
+    #     ENV_FILE=.env.pingfed python deploy.py --create
+    # Real shell env vars still take precedence (load_dotenv does not override).
+    load_dotenv(os.getenv('ENV_FILE') or '.env')
 except ImportError:
     pass
 
