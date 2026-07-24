@@ -3,7 +3,16 @@
 Uses ADK directly — not Agent Studio — so we can attach before_agent_callback
 to inject per-session MCP auth headers from Vertex session state.
 
+RUNTIME PYTHON VERSION — IMPORTANT:
+    Deploy from a Python 3.12 (or 3.13) venv. Agent Engine builds a runtime image
+    matching your local Python minor version; the 3.14 image (assembly-service-py314)
+    is too new and a provably-working app fails to boot in it — the engine reports
+    "failed to start and cannot serve traffic" with NO serving logs. The app itself
+    is fine (verify locally with test_roundtrip.py); it is the py314 runtime that
+    won't run it. Build on 3.12 and the deploy succeeds.
+
 Prerequisites:
+    python3.12 -m venv .venv && source .venv/bin/activate   # NOT 3.14
     pip install -r requirements.txt
     gcloud auth application-default login
 
@@ -40,18 +49,40 @@ PROJECT_ID = 'cprice---agentic-demos'
 LOCATION = 'us-west1'
 STAGING_BUCKET = 'gs://notflux-agent-staging'  # must exist in the project
 
+# NOTE: agent.py imports McpToolset from google.adk.tools.mcp_tool, which needs
+# the `mcp` package. That package is ONLY pulled in by the google-adk[mcp] extra
+# — neither plain `google-adk` nor aiplatform's [adk] extra installs it. If it is
+# missing from this list, the Agent Engine container installs an ADK without mcp,
+# `import agent` raises ModuleNotFoundError at startup, and create() fails with
+# "Reasoning Engine ... failed to start and cannot serve traffic". So the [mcp]
+# extra here is load-bearing, not cosmetic.
 REQUIREMENTS = [
-    # The pickle references vertexai.agent_engines.templates.adk (from AdkApp).
-    # The runtime venv is isolated — vertexai is NOT inherited from the base image.
-    # We must install google-cloud-aiplatform into the venv so the pickle loads.
+    # Agent Engine loads code.pkl inside an isolated runtime venv. cloudpickle is
+    # version-sensitive: if the runtime installs a NEWER build of any library that
+    # a pickled object depends on than the one that CREATED the pickle, the load
+    # crashes before uvicorn starts — the engine "failed to start and cannot serve
+    # traffic" with no serving logs. So every dependency here is pinned to the exact
+    # version in the local venv that ran deploy.py (see `pip freeze`).
     #
-    # Pin to 1.152.0 (the version that created the pickle) because:
-    #   - It has vertexai.agent_engines.templates.adk  ✓
-    #   - It constrains google-genai<2.0.0, which prevents a major-version
-    #     upgrade that otherwise crashes the entrypoint before uvicorn starts  ✓
-    'google-cloud-aiplatform==1.152.0',
-    'pydantic',
-    'cloudpickle',
+    #   - google-cloud-aiplatform provides vertexai.agent_engines.templates.adk,
+    #     the AdkApp class the pickle is an instance of, so its version must match
+    #     the LOCAL venv that ran deploy.py — otherwise the runtime can't unpickle.
+    #     Pinned to 1.162.0 (NOT 1.152.0): aiplatform 1.152.0 declares google-genai
+    #     <2.0.0, which conflicts with google-adk 2.5.0's genai 2.x and makes the
+    #     runtime pip resolve fail (ResolutionImpossible). 1.162.0 allows genai<3.0.
+    #     IMPORTANT: keep your local aiplatform at 1.162.0 too and re-run deploy.py
+    #     so the pickle is created with the same version the runtime installs.
+    #     The [adk,reasoningengine] extras are required (they pull the serving deps).
+    #   - google-adk is NON-NEGOTIABLE: root_agent is a google.adk LlmAgent, so the
+    #     runtime literally cannot unpickle the agent without ADK installed. The
+    #     [mcp] extra pulls the `mcp` package that agent.py's McpToolset imports.
+    #   - google-genai 2.14.0 satisfies aiplatform 1.162.0 (<3.0.0) and google-adk
+    #     2.5.0; it's the version already in the local venv.
+    'google-cloud-aiplatform[adk,reasoningengine]==1.162.0',
+    'google-adk[mcp]==2.5.0',
+    'google-genai==2.14.0',
+    'pydantic==2.13.4',
+    'cloudpickle==3.1.2',
     'requests>=2.32.0',    # Exchange 2: agent_token -> mcp_token via PingOne
 ]
 
@@ -73,6 +104,43 @@ AGENT_ENV_VARS = {
     # GOOGLE_CLOUD_LOCATION, which GCP does set in the managed runtime.
 }
 
+# ---------------------------------------------------------------------------
+# Agent runtime identity (the Agent Identifier for PingOne 3rd-party exchange).
+#
+# When SERVICE_ACCOUNT is set, the engine RUNS AS that user-managed service
+# account, so the OIDC identity token from the metadata server carries THAT
+# account's email/sub — a persistent, per-agent identity you control. When it
+# is empty, the engine runs as Google's shared, project-level Agent Engine
+# service agent (service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re...), which is
+# identical for every engine in the project and cannot distinguish one agent
+# from another.
+#
+# Set AGENT_SERVICE_ACCOUNT per agent (e.g. notflux-agent@..., pingfed-agent@...)
+# so each deployment presents its own stable identifier. The identity is stable
+# across --update AND --create (it is your SA, not tied to the engine's ID).
+#
+# PREREQUISITES for a custom SA (deploy fails without them):
+#   1. The SA exists in this project.
+#   2. The Agent Engine service agent can impersonate it — grant the SA:
+#        gcloud iam service-accounts add-iam-policy-binding <SA_EMAIL> \
+#          --member="serviceAccount:service-<PROJECT_NUMBER>@gcp-sa-aiplatform-re.iam.gserviceaccount.com" \
+#          --role="roles/iam.serviceAccountUser"
+#   3. The SA has the perms the agent needs at runtime (e.g. roles/aiplatform.user
+#      for the Gemini model call).
+# ---------------------------------------------------------------------------
+SERVICE_ACCOUNT = os.getenv('AGENT_SERVICE_ACCOUNT', '').strip()
+
+
+def _identity_kwargs() -> dict:
+    """Pass service_account only when set — omit it entirely otherwise, so the
+    engine falls back to the managed default SA rather than being handed ''."""
+    if SERVICE_ACCOUNT:
+        print(f'Runtime identity (Agent Identifier): {SERVICE_ACCOUNT}')
+        return {'service_account': SERVICE_ACCOUNT}
+    print('Runtime identity: managed default Agent Engine service agent '
+          '(project-scoped; set AGENT_SERVICE_ACCOUNT for a per-agent identity)')
+    return {}
+
 
 def create_agent() -> AgentEngine:
     vertexai.init(project=PROJECT_ID, location=LOCATION, staging_bucket=STAGING_BUCKET)
@@ -84,6 +152,7 @@ def create_agent() -> AgentEngine:
         display_name='NotFlux',
         description='NotFlux AI assistant with PingOne Token Exchange for MCP access',
         env_vars=AGENT_ENV_VARS,
+        **_identity_kwargs(),
     )
     resource_id = engine.resource_name.split('/')[-1]
     print(f'Created: {engine.resource_name}')
@@ -102,6 +171,7 @@ def update_agent(resource_id: str) -> AgentEngine:
         requirements=REQUIREMENTS,
         extra_packages=['agent.py'],
         env_vars=AGENT_ENV_VARS,
+        **_identity_kwargs(),
     )
     print(f'Updated: {engine.resource_name}')
     return engine
