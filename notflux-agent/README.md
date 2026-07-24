@@ -185,6 +185,18 @@ second time with a different `.env`; the two agents share the PingGateway routes
 and differ only in configuration. Switching which one notflux-app targets stays a
 single `VERTEX_AGENT_RESOURCE` change in the backend `.env`.
 
+Both env files live in this one folder — no copying. `deploy.py` and the test
+probes load `.env` by default, or the file named by `ENV_FILE`:
+
+```bash
+# keep .env (PingOne) and .env.pingfed side by side; pick one per command:
+ENV_FILE=.env.pingfed python test_roundtrip.py   # verify locally
+ENV_FILE=.env.pingfed python deploy.py --create  # deploy the PingFed agent
+```
+
+`.env.*` is gitignored (except `.env.example`), so secrets stay local. Real shell
+env vars still win over the file, so you can also override a single value inline.
+
 What differs between the two deployments — all env, no code:
 
 - **Token endpoint:** set `TOKEN_EXCHANGE_ENDPOINT=https://<pingfed-host>/as/token`.
