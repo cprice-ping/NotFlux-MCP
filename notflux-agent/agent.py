@@ -83,6 +83,17 @@ _PINGONE_AGENT_AUDIENCE = os.getenv('PINGONE_AGENT_AUDIENCE', '')
 # Scope to request in Exchange 2 — PingOne maps this to the MCP resource server aud
 _PINGONE_MCP_SCOPE      = os.getenv('PINGONE_MCP_SCOPE', '')
 
+# Exchange 2 token endpoint. Defaults to the PingOne environment's endpoint for
+# backward compatibility; set TOKEN_EXCHANGE_ENDPOINT to point Exchange 2 at a
+# different provider (e.g. PingFed) with NO code change. This is what lets a
+# second NotFlux agent serve the same PingGateway routes with a different IdP —
+# only the endpoint, client creds, audience/scope, service account, and display
+# name differ between the two deployments. (PINGONE_CLIENT_ID/SECRET/SCOPE are the
+# Exchange 2 client regardless of provider; the name is historical.)
+_TOKEN_ENDPOINT = os.getenv('TOKEN_EXCHANGE_ENDPOINT', '').strip() or (
+    f'https://auth.pingone.com/{_PINGONE_ENV_ID}/as/token' if _PINGONE_ENV_ID else ''
+)
+
 # Simple in-process token cache: stripped_agent_token → (mcp_token, expires_at)
 _mcp_token_cache: dict[str, tuple[str, float]] = {}
 
@@ -109,12 +120,9 @@ def _log_workload_identity_once() -> None:
         return
     _workload_identity_logged = True
 
-    # Use the eventual PingOne audience so the aud claim is meaningful.
-    audience = (
-        f'https://auth.pingone.com/{_PINGONE_ENV_ID}/as/token'
-        if _PINGONE_ENV_ID
-        else 'https://iam.googleapis.com'
-    )
+    # Use the eventual token-exchange endpoint as the audience so the aud claim is
+    # meaningful (PingOne or PingFed, whichever this agent is configured for).
+    audience = _TOKEN_ENDPOINT or 'https://iam.googleapis.com'
 
     try:
         resp = http_requests.get(
@@ -178,8 +186,8 @@ def _exchange_for_mcp_token(agent_token: str) -> str:
     Falls back to returning the original token when PingOne env vars are unset
     (useful for local dev or before P1 is wired up).
     """
-    if not all([_PINGONE_ENV_ID, _PINGONE_CLIENT_ID, _PINGONE_CLIENT_SECRET, _PINGONE_MCP_SCOPE]):
-        logging.warning('exchange_for_mcp: PingOne env vars not configured — using agent token directly')
+    if not all([_TOKEN_ENDPOINT, _PINGONE_CLIENT_ID, _PINGONE_CLIENT_SECRET, _PINGONE_MCP_SCOPE]):
+        logging.warning('exchange_for_mcp: token-exchange env vars not configured — using agent token directly')
         return agent_token
 
     # Validate that the token from session state was issued for this agent.
@@ -210,7 +218,7 @@ def _exchange_for_mcp_token(agent_token: str) -> str:
         return cached[0]
 
     agent_id  = _get_vertex_agent_id()
-    token_url = f'https://auth.pingone.com/{_PINGONE_ENV_ID}/as/token'
+    token_url = _TOKEN_ENDPOINT
 
     # client_secret_basic — credentials in Authorization header (same as backend)
     basic_cred = base64.b64encode(
