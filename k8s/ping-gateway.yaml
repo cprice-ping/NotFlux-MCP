@@ -74,7 +74,7 @@ data:
   notflux-mcp-proxy.json: |
     {
       "name": "notflux-mcp-proxy",
-      "condition": "${find(request.uri.path, '^/mcp')}",
+      "condition": "${find(request.uri.path, '^/mcp(?!/weather|/agent-registry)')}",
       "heap": [
         {
           "name": "SecretsStore",
@@ -242,6 +242,210 @@ data:
         }
       }
     }
+
+  weather-mcp-proxy.json: |
+    {
+      "name": "weather-mcp-proxy",
+      "condition": "${find(request.uri.path, '^/mcp/weather')}",
+      "heap": [
+        {
+          "name": "SecretsStore",
+          "type": "SystemAndEnvSecretStore",
+          "config": { "format": "PLAIN" }
+        },
+        {
+          "name": "IntrospectionProviderHandler",
+          "type": "Chain",
+          "config": {
+            "filters": [{
+              "name": "IntrospectionClientBasicAuth",
+              "type": "ClientSecretBasicAuthenticationFilter",
+              "config": {
+                "clientId": "${env['OAUTH_INTROSPECT_CLIENT_ID']}",
+                "clientSecretId": "oauth.introspect.client.secret",
+                "secretsProvider": "SecretsStore"
+              }
+            }],
+            "handler": { "type": "ClientHandler" }
+          }
+        },
+        {
+          "name": "RsFilterTokenResolver",
+          "type": "TokenIntrospectionAccessTokenResolver",
+          "config": {
+            "endpoint": "${env['OAUTH_INTROSPECT_URL']}",
+            "providerHandler": "IntrospectionProviderHandler"
+          }
+        },
+        {
+          "name": "rsFilter",
+          "type": "OAuth2ResourceServerFilter",
+          "config": {
+            "requireHttps": false,
+            "scopes": [ "&{agentFacingScope}" ],
+            "accessTokenResolver": "RsFilterTokenResolver"
+          }
+        },
+        {
+          "name": "P1AZDenyHandler",
+          "type": "StaticResponseHandler",
+          "config": {
+            "status": 403,
+            "headers": { "Content-Type": [ "application/json" ] },
+            "entity": "{\"error\":\"access_denied\",\"error_description\":\"Request denied by policy\"}"
+          }
+        }
+      ],
+      "properties": {
+        "gatewayUrl": "https://notflux-gateway.ping-devops.com",
+        "authorizationServerUri": "https://auth.pingone.com/59bb6a66-e76e-490c-b83a-884c50423da4/as",
+        "weatherMcpServerUrl": "http://weather-mcp-server",
+        "agentFacingScope": "use_gateway"
+      },
+      "baseURI": "&{weatherMcpServerUrl}",
+      "handler": {
+        "type": "Chain",
+        "config": {
+          "filters": [
+            {
+              "type": "UriPathRewriteFilter",
+              "config": { "mappings": { "/mcp/weather": "/mcp" } }
+            },
+            "rsFilter",
+            {
+              "name": "P1AZPolicyDecision",
+              "type": "PingAuthorizeFilter",
+              "config": {
+                "gatewayServiceUri": "&{P1AZ_GATEWAY_SERVICE_URI}",
+                "secretsProvider": "SecretsStore",
+                "gatewayCredentialSecretId": "p1az.gateway.credential",
+                "includeBodyContentTypes": ["application/json"]
+              }
+            },
+            {
+              "type": "McpValidationFilter",
+              "config": { "acceptedOrigins": ".*" }
+            },
+            {
+              "type": "HeaderFilter",
+              "config": {
+                "messageType": "request",
+                "remove": [ "Authorization" ],
+                "add": { "X-Api-Key": [ "${env['WEATHER_MCP_API_KEY']}" ] }
+              }
+            }
+          ],
+          "handler": {
+            "type": "ReverseProxyHandler",
+            "config": { "soTimeout": "30 seconds" }
+          }
+        }
+      }
+    }
+
+  agent-registry-mcp-proxy.json: |
+    {
+      "name": "agent-registry-mcp-proxy",
+      "condition": "${find(request.uri.path, '^/mcp/agent-registry')}",
+      "heap": [
+        {
+          "name": "SecretsStore",
+          "type": "SystemAndEnvSecretStore",
+          "config": { "format": "PLAIN" }
+        },
+        {
+          "name": "IntrospectionProviderHandler",
+          "type": "Chain",
+          "config": {
+            "filters": [{
+              "name": "IntrospectionClientBasicAuth",
+              "type": "ClientSecretBasicAuthenticationFilter",
+              "config": {
+                "clientId": "${env['OAUTH_INTROSPECT_CLIENT_ID']}",
+                "clientSecretId": "oauth.introspect.client.secret",
+                "secretsProvider": "SecretsStore"
+              }
+            }],
+            "handler": { "type": "ClientHandler" }
+          }
+        },
+        {
+          "name": "RsFilterTokenResolver",
+          "type": "TokenIntrospectionAccessTokenResolver",
+          "config": {
+            "endpoint": "${env['OAUTH_INTROSPECT_URL']}",
+            "providerHandler": "IntrospectionProviderHandler"
+          }
+        },
+        {
+          "name": "rsFilter",
+          "type": "OAuth2ResourceServerFilter",
+          "config": {
+            "requireHttps": false,
+            "scopes": [ "&{agentFacingScope}" ],
+            "accessTokenResolver": "RsFilterTokenResolver"
+          }
+        },
+        {
+          "name": "P1AZDenyHandler",
+          "type": "StaticResponseHandler",
+          "config": {
+            "status": 403,
+            "headers": { "Content-Type": [ "application/json" ] },
+            "entity": "{\"error\":\"access_denied\",\"error_description\":\"Request denied by policy\"}"
+          }
+        }
+      ],
+      "properties": {
+        "gatewayUrl": "https://notflux-gateway.ping-devops.com",
+        "authorizationServerUri": "https://auth.pingone.com/59bb6a66-e76e-490c-b83a-884c50423da4/as",
+        "agentRegistryServerUrl": "http://spicedb-mcp-bridge:8000",
+        "agentFacingScope": "use_gateway"
+      },
+      "baseURI": "&{agentRegistryServerUrl}",
+      "handler": {
+        "type": "Chain",
+        "config": {
+          "filters": [
+            {
+              "type": "UriPathRewriteFilter",
+              "config": { "mappings": { "/mcp/agent-registry": "/mcp" } }
+            },
+            "rsFilter",
+            {
+              "name": "P1AZPolicyDecision",
+              "type": "PingAuthorizeFilter",
+              "config": {
+                "gatewayServiceUri": "&{P1AZ_GATEWAY_SERVICE_URI}",
+                "secretsProvider": "SecretsStore",
+                "gatewayCredentialSecretId": "p1az.gateway.credential",
+                "includeBodyContentTypes": ["application/json"]
+              }
+            },
+            {
+              "type": "McpValidationFilter",
+              "config": { "acceptedOrigins": ".*" }
+            },
+            {
+              "type": "HeaderFilter",
+              "config": {
+                "messageType": "request",
+                "remove": [ "Authorization" ],
+                "add": {
+                  "Authorization": [ "Bearer ${env['SPICE_MCP_API_KEY']}" ],
+                  "X-Remote-User":  [ "${contexts.oauth2.accessToken.claims.sub}" ],
+                  "X-Remote-Agent": [ "${contexts.oauth2.accessToken.claims.act.sub}" ]
+                }
+              }
+            }
+          ],
+          "handler": {
+            "type": "ReverseProxyHandler",
+            "config": { "soTimeout": "30 seconds" }
+          }
+        }
+      }
+    }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -329,6 +533,12 @@ spec:
             - name: gateway-config
               mountPath: /var/gateway/config/routes/notflux-mcp-proxy.json
               subPath: notflux-mcp-proxy.json
+            - name: gateway-config
+              mountPath: /var/gateway/config/routes/weather-mcp-proxy.json
+              subPath: weather-mcp-proxy.json
+            - name: gateway-config
+              mountPath: /var/gateway/config/routes/agent-registry-mcp-proxy.json
+              subPath: agent-registry-mcp-proxy.json
       volumes:
         - name: gateway-instance
           emptyDir: {}
