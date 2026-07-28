@@ -20,6 +20,7 @@
 #     --from-literal=PINGFED_TE_CLIENT_ID=<client-id> \
 #     --from-literal=PINGFED_TE_CLIENT_SECRET=<client-secret> \
 #     --from-literal=PINGFED_AUTHZ_SERVER_URI=https://<pf-host>/as \
+#     --from-literal=PINGFED_TOKEN_ENDPOINT=https://<pf-host>/as/token.oauth2 \
 #     --dry-run=client -o yaml | kubectl apply -f -
 # (or manage it via a SealedSecret / ExternalSecret). The Secret resource below
 # is a template only; `kubectl apply` will not overwrite a secret created out of
@@ -511,6 +512,7 @@ data:
       "properties": {
         "gatewayUrl": "https://notflux-gateway.ping-devops.com",
         "pingFedAuthzServerUri": "${env['PINGFED_AUTHZ_SERVER_URI']}",
+        "pingFedTokenEndpoint": "${env['PINGFED_TOKEN_ENDPOINT']}",
         "mcpServerUrl": "http://notflux-mcp-server",
         "mcpServerAudience": "notflux-mcp",
         "agentFacingScope": "use_gateway",
@@ -553,7 +555,7 @@ data:
               "name": "PfGatewayToMcpTokenExchange",
               "type": "OAuth2TokenExchangeFilter",
               "config": {
-                "endpoint": "&{pingFedAuthzServerUri}/token",
+                "endpoint": "&{pingFedTokenEndpoint}",
                 "endpointHandler": "PfTokenExchangeEndpointHandler",
                 "failureHandler": "PfTokenExchangeFailureHandler",
                 "subjectToken": "${request.headers['Authorization'][0].substring(7)}",
@@ -676,6 +678,11 @@ spec:
                 secretKeyRef:
                   name: ping-gateway-secrets
                   key: PINGFED_AUTHZ_SERVER_URI
+            - name: PINGFED_TOKEN_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: ping-gateway-secrets
+                  key: PINGFED_TOKEN_ENDPOINT
           resources:
             limits:
               cpu: "1"
