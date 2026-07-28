@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# PingGateway — Secret, ConfigMap, Deployment, Service, Ingress
+# PingGateway — ConfigMap, Deployment, Service, Ingress
 # Namespace: ping-devops-cprice
 #
 # Before applying: create ping-gateway-secrets OUT OF BAND. Do NOT commit real
@@ -25,28 +25,7 @@
 #              PingGateway exchanges (TokenExchange.groovy) --> backend mcp_token
 #              PingGateway proxies --> https://notflux-mcp.ping-devops.com
 # ---------------------------------------------------------------------------
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ping-gateway-secrets
-  namespace: ping-devops-cprice
-type: Opaque
-stringData:
-  # Populate out of band (see header). Leave empty in source control.
-  PINGONE_TE_CLIENT_ID:     ""
-  PINGONE_TE_CLIENT_SECRET: ""
-  OAUTH_INTROSPECT_CLIENT_ID: ""
-  OAUTH_INTROSPECT_CLIENT_SECRET: ""
-  OAUTH_INTROSPECT_URL: ""
-  # PingOne Authorize Sideband API — Authorization > API gateways > Service URL
-  P1AZ_GATEWAY_SERVICE_URI: ""
-  # PingOne Authorize Sideband API credential — Authorization > API gateways > select gateway > add credential
-  P1AZ_GATEWAY_CREDENTIAL:  ""
-  # Shared secret with weather-mcp-server — must match WEATHER_API_KEY in weather-mcp-secrets
-  WEATHER_MCP_API_KEY: ""
-  # Shared secret with spice-mcp-bridge (Agent-Registry) — must match SPICE_MCP_API_KEY in spice-mcp-bridge secrets
-  SPICE_MCP_API_KEY: ""
----
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -215,7 +194,7 @@ data:
                 "endpoint": "&{authorizationServerUri}/token",
                 "endpointHandler": "TokenExchangeEndpointHandler",
                 "failureHandler": "TokenExchangeFailureHandler",
-                "subjectToken": "#{request.headers['Authorization'][0].substring(7)}",
+                "subjectToken": "${request.headers['Authorization'][0].substring(7)}",
                 "subjectTokenType": "urn:ietf:params:oauth:token-type:access_token",
                 "requestedTokenType": "urn:ietf:params:oauth:token-type:access_token",
                 "scopes": [ "&{mcpServerScope}" ],
@@ -505,6 +484,16 @@ spec:
                 secretKeyRef:
                   name: ping-gateway-secrets
                   key: P1AZ_GATEWAY_CREDENTIAL
+            - name: WEATHER_MCP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ping-gateway-secrets
+                  key: WEATHER_MCP_API_KEY
+            - name: SPICE_MCP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ping-gateway-secrets
+                  key: SPICE_MCP_API_KEY
           resources:
             limits:
               cpu: "1"
