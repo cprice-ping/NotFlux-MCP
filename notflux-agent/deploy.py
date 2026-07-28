@@ -95,18 +95,29 @@ REQUIREMENTS = [
 # Values are read from the environment (or notflux-agent/.env — gitignored).
 # See .env.example for the required keys.
 # ---------------------------------------------------------------------------
-AGENT_ENV_VARS = {
+AGENT_ENV_VARS = {k: v for k, v in {
     'PINGONE_ENV_ID':         os.getenv('PINGONE_ENV_ID', ''),
     'PINGONE_CLIENT_ID':      os.getenv('PINGONE_CLIENT_ID', ''),
     'PINGONE_CLIENT_SECRET':  os.getenv('PINGONE_CLIENT_SECRET', ''),
     'PINGONE_AGENT_AUDIENCE': os.getenv('PINGONE_AGENT_AUDIENCE', ''),
     'PINGONE_MCP_SCOPE':      os.getenv('PINGONE_MCP_SCOPE', ''),
+    # Exchange 2 routing — must be injected so the runtime knows which IdP to call.
+    # For PingOne agents leave TOKEN_EXCHANGE_ENDPOINT blank (defaults to P1).
+    # For PingFed agents set TOKEN_EXCHANGE_ENDPOINT=https://<pf-host>/as/token
+    # and SEND_ACTOR_TOKEN=true in .env-pingfed before deploying.
+    'TOKEN_EXCHANGE_ENDPOINT': os.getenv('TOKEN_EXCHANGE_ENDPOINT', ''),
+    'SEND_ACTOR_TOKEN':        os.getenv('SEND_ACTOR_TOKEN', ''),
+    'ACTOR_TOKEN_TYPE':        os.getenv('ACTOR_TOKEN_TYPE', ''),
+    'ACTOR_TOKEN_AUDIENCE':    os.getenv('ACTOR_TOKEN_AUDIENCE', ''),
+    'EXCHANGE_AUDIENCE':       os.getenv('EXCHANGE_AUDIENCE', ''),
+    'EXCHANGE_RESOURCE':       os.getenv('EXCHANGE_RESOURCE', ''),
+    'SUBJECT_TOKEN_TYPE':      os.getenv('SUBJECT_TOKEN_TYPE', ''),
     # VERTEX_REASONING_ENGINE_ID is NOT injected here — Vertex does not expose
     # the engine's own resource ID to its runtime automatically, and passing it
     # at create-time creates a chicken-and-egg problem.  _get_vertex_agent_id()
     # in agent.py constructs a partial identifier from GOOGLE_CLOUD_PROJECT and
     # GOOGLE_CLOUD_LOCATION, which GCP does set in the managed runtime.
-}
+}.items() if v}  # Vertex rejects env vars with empty values — omit unset keys
 
 # ---------------------------------------------------------------------------
 # Agent runtime identity (the Agent Identifier for PingOne 3rd-party exchange).
@@ -196,17 +207,57 @@ def recreate_agent(resource_id: str) -> AgentEngine:
     return create_agent()
 
 
+def patch_env(resource_id: str) -> None:
+    """Patch ONLY the env vars on a running engine — no container rebuild.
+
+    Uses the Vertex REST API directly with updateMask=spec.deploymentSpec.env so
+    only the env vars are changed. The running containers are restarted by Vertex
+    to pick up the new values (env vars are injected at container start; the
+    in-process os.getenv() calls at module-import time mean a restart is needed
+    for the new values to take effect in agent.py).
+
+    This is much faster than --update (no Docker build) and works even when the
+    full SDK update path fails.
+    """
+    import google.auth
+    import google.auth.transport.requests as ga_requests
+
+    creds, _ = google.auth.default()
+    creds.refresh(ga_requests.Request())
+
+    env_list = [{'name': k, 'value': v} for k, v in AGENT_ENV_VARS.items()]
+    url = (
+        f'https://{LOCATION}-aiplatform.googleapis.com/v1/'
+        f'projects/{PROJECT_ID}/locations/{LOCATION}/reasoningEngines/{resource_id}'
+        f'?updateMask=spec.deploymentSpec.env'
+    )
+    import requests as http_req
+    r = http_req.patch(
+        url,
+        headers={'Authorization': f'Bearer {creds.token}', 'Content-Type': 'application/json'},
+        json={'spec': {'deploymentSpec': {'env': env_list}}},
+    )
+    r.raise_for_status()
+    print(f'Patched env vars on {resource_id}: {r.status_code}')
+    for e in env_list:
+        val = e['value'] if 'SECRET' not in e['name'] and 'PASSWORD' not in e['name'] else '***'
+        print(f'  {e["name"]}={val}')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Deploy NotFlux agent to Vertex AI Agent Engine')
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--create', action='store_true', help='Create a new agent')
     group.add_argument('--update', metavar='RESOURCE_ID', help='Update existing agent by resource ID')
     group.add_argument('--recreate', metavar='RESOURCE_ID', help='Delete existing agent and create a fresh one (use when switching from Studio deployment)')
+    group.add_argument('--patch-env', metavar='RESOURCE_ID', help='Patch only env vars (no rebuild) — fast config update')
     args = parser.parse_args()
 
     if args.create:
         create_agent()
     elif args.recreate:
         recreate_agent(args.recreate)
+    elif args.patch_env:
+        patch_env(args.patch_env)
     else:
         update_agent(args.update)

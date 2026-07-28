@@ -112,6 +112,13 @@ _ACTOR_TOKEN_AUDIENCE = os.getenv('ACTOR_TOKEN_AUDIENCE', '').strip()
 # Often unnecessary — the provider's policy sets the issued aud (PF does).
 _EXCHANGE_AUDIENCE = os.getenv('EXCHANGE_AUDIENCE', '').strip()
 _EXCHANGE_RESOURCE = os.getenv('EXCHANGE_RESOURCE', '').strip()
+# Type URI for the subject_token sent in Exchange 2.
+# PingOne accepts access_token (default); PingFed requires jwt because it
+# validates the P1 agent_token as a signed JWT rather than an opaque token.
+_SUBJECT_TOKEN_TYPE = os.getenv(
+    'SUBJECT_TOKEN_TYPE',
+    'urn:ietf:params:oauth:token-type:access_token',
+).strip()
 
 # Simple in-process token cache: stripped_agent_token → (mcp_token, expires_at)
 _mcp_token_cache: dict[str, tuple[str, float]] = {}
@@ -256,7 +263,7 @@ def _exchange_for_mcp_token(agent_token: str) -> str:
         # access_token is semantically correct for a PingOne-issued OAuth token.
         # If the P1 Token Exchange policy is configured to expect a JWT assertion
         # instead, change this to: urn:ietf:params:oauth:token-type:jwt
-        'subject_token_type':    'urn:ietf:params:oauth:token-type:access_token',
+        'subject_token_type':    _SUBJECT_TOKEN_TYPE,
         'requested_token_type':  'urn:ietf:params:oauth:token-type:access_token',
         'scope':                 _PINGONE_MCP_SCOPE,
     }
